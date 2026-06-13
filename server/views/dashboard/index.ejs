@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard | Blox AI</title>
+    
+    <link rel="icon" type="image/svg+xml" href="/images/favicon.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    
+    <link rel="stylesheet" href="/css/main.css">
+    <link rel="stylesheet" href="/css/components.css">
+    <link rel="stylesheet" href="/css/animations.css">
+    <link rel="stylesheet" href="/css/dashboard.css">
+    <link rel="stylesheet" href="/css/responsive.css">
+</head>
+<body class="dashboard-body">
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <div class="logo-icon">
+                        <i class="fas fa-cube"></i>
+                    </div>
+                    <span class="logo-text">Blox <span class="gradient-text">AI</span></span>
+                </div>
+                <button class="sidebar-toggle" id="sidebarToggleMobile">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            
+            <!-- Navigation -->
+            <nav class="sidebar-nav">
+                <div class="nav-section">
+                    <div class="nav-title">Principal</div>
+                    <a href="#chat" class="nav-item active" data-section="chat">
+                        <i class="fas fa-comments"></i>
+                        <span>Chat IA</span>
+                        <span class="nav-badge">3</span>
+                    </a>
+                    <a href="#explorer" class="nav-item" data-section="explorer">
+                        <i class="fas fa-sitemap"></i>
+                        <span>Explorador</span>
+                    </a>
+                    <a href="#projects" class="nav-item" data-section="projects">
+                        <i class="fas fa-folder-open"></i>
+                        <span>Projetos</span>
+                    </a>
+                    <a href="#history" class="nav-item" data-section="history">
+                        <i class="fas fa-history"></i>
+                        <span>Histórico</span>
+                    </a>
+                </div>
+                
+                <div class="nav-section">
+                    <div class="nav-title">Recursos</div>
+                    <a href="#docs" class="nav-item" data-section="docs">
+                        <i class="fas fa-book"></i>
+                        <span>Documentação</span>
+                    </a>
+                    <a href="#settings" class="nav-item" data-section="settings">
+                        <i class="fas fa-cog"></i>
+                        <span>Configurações</span>
+                    </a>
+                </div>
+            </nav>
+            
+            <!-- Subscription Card -->
+            <div class="subscription-card">
+                <div class="sub-header">
+                    <span class="sub-badge" id="subBadge">FREE</span>
+                    <span class="sub-status" id="subStatus">Ativo</span>
+                </div>
+                <h4 class="sub-title" id="subTitle">Plano Grátis</h4>
+                <div class="sub-usage">
+                    <div class="usage-info">
+                        <span>Requisições</span>
+                        <span id="usageText">0/100</span>
+                    </div>
+                    <div class="usage-bar">
+                        <div class="usage-fill" id="usageFill" style="width: 0%"></div>
+                    </div>
+                </div>
+                <button class="btn btn-upgrade" id="upgradeBtn">
+                    <i class="fas fa-rocket"></i>
+                    Fazer Upgrade
+                </button>
+            </div>
+            
+            <!-- User Profile -->
+            <div class="user-profile">
+                <div class="user-avatar" id="userAvatar">U</div>
+                <div class="user-info">
+                    <div class="user-name" id="userName">Usuário</div>
+                    <div class="user-email" id="userEmail">user@email.com</div>
+                </div>
+                <button class="user-menu-btn" id="userMenuBtn">
+                    <i class="fas fa-ellipsis-v"></i>
+                </button>
+                <div class="user-menu" id="userMenu">
+                    <a href="#profile"><i class="fas fa-user"></i> Perfil</a>
+                    <a href="#settings"><i class="fas fa-cog"></i> Configurações</a>
+                    <a href="#billing"><i class="fas fa-credit-card"></i> Cobrança</a>
+                    <hr>
+                    <a href="#" id="logoutBtn"><i class="fas fa-sign-out-alt"></i> Sair</a>
+                </div>
+            </div>
+        </aside>
+        
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Top Bar -->
+            <header class="topbar">
+                <button class="sidebar-toggle" id="sidebarToggle">
+                    <i class="fas fa-bars"></i>
+                </button>
+                
+                <!-- Breadcrumb -->
+                <div class="breadcrumb">
+                    <span>Dashboard</span>
+                    <i class="fas fa-chevron-right"></i>
+                    <span id="sectionTitle">Chat IA</span>
+                </div>
+                
+                <!-- Top Actions -->
+                <div class="topbar-actions">
+                    <!-- Search -->
+                    <div class="search-box">
+                        <i class="fas fa-search"></i>
+                        <input type="text" placeholder="Buscar..." id="globalSearch">
+                        <kbd>Ctrl K</kbd>
+                    </div>
+                    
+                    <!-- Notifications -->
+                    <button class="icon-btn" id="notificationsBtn">
+                        <i class="fas fa-bell"></i>
+                        <span class="notification-dot"></span>
+                    </button>
+                    
+                    <!-- Provider Selector -->
+                    <div class="provider-selector">
+                        <button class="provider-btn" id="providerBtn">
+                            <i class="fas fa-robot"></i>
+                            <span id="currentProvider">Blox AI</span>
+                            <i class="fas fa-chevron-down"></i>
+                        </button>
+                        <div class="provider-menu" id="providerMenu">
+                            <div class="provider-option" data-provider="blox">
+                                <i class="fas fa-cube"></i>
+                                <div>
+                                    <strong>Blox AI</strong>
+                                    <small>Plataforma (Padrão)</small>
+                                </div>
+                            </div>
+                            <div class="provider-option" data-provider="openai">
+                                <i class="fas fa-brain"></i>
+                                <div>
+                                    <strong>OpenAI</strong>
+                                    <small>GPT-4o / GPT-4o-mini</small>
+                                </div>
+                            </div>
+                            <div class="provider-option" data-provider="gemini">
+                                <i class="fas fa-gem"></i>
+                                <div>
+                                    <strong>Google Gemini</strong>
+                                    <small>1.5 Pro / Flash</small>
+                                </div>
+                            </div>
+                            <div class="provider-option" data-provider="kimi">
+                                <i class="fas fa-moon"></i>
+                                <div>
+                                    <strong>Moonshot Kimi</strong>
+                                    <small>K2.5</small>
+                                </div>
+                            </div>
+                            <div class="provider-option" data-provider="custom">
+                                <i class="fas fa-code"></i>
+                                <div>
+                                    <strong>API Customizada</strong>
+                                    <small>OpenAI-compatible</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </header>
+            
+            <!-- Section: Chat -->
+            <section class="content-section active" id="section-chat">
+                <div class="chat-container">
+                    <!-- Chat Header -->
+                    <div class="chat-header">
+                        <div class="chat-title">
+                            <div class="chat-ai-avatar">
+                                <i class="fas fa-robot"></i>
+                                <div class="status-indicator online"></div>
+                            </div>
+                            <div>
+                                <h3 id="chatSessionTitle">Nova Conversa</h3>
+                                <span class="chat-status">
+                                    <span class="status-dot"></span>
+                                    <span id="chatStatus">Conectado • Pronto para ajudar</span>
+                                </span>
+                            </div>
+                        </div>
+                        <div class="chat-actions">
+                            <button class="icon-btn" title="Nova conversa" id="newChatBtn">
+                                <i class="fas fa-plus"></i>
+                            </button>
+                            <button class="icon-btn" title="Exportar" id="exportChatBtn">
+                                <i class="fas fa-download"></i>
+                            </button>
+                            <button class="icon-btn" title="Configurações" id="chatSettingsBtn">
+                                <i class="fas fa-sliders-h"></i>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Messages -->
+                    <div class="chat-messages" id="chatMessages">
+                        <!-- Welcome Message -->
+                        <div class="message message-assistant welcome">
+                            <div class="message-avatar">
+                                <i class="fas fa-robot"></i>
+                            </div>
+                            <div class="message-content">
+                                <div class="message-bubble">
+                                    <h4>👋 Olá! Sou o Blox AI</h4>
+                                    <p>Seu agente de IA especializado em desenvolvimento Roblox. Posso:</p>
+                                    <ul>
+                                        <li><i class="fas fa-code"></i> Criar scripts Luau completos</li>
+                                        <li><i class="fas fa-palette"></i> Gerar interfaces (UIs)</li>
+                                        <li><i class="fas fa-cubes"></i> Manipular o Workspace</li>
+                                        <li><i class="fas fa-bug"></i> Corrigir bugs automaticamente</li>
+                                    </ul>
+                                    <p>Como posso ajudar você hoje?</p>
+                                </div>
+                                <div class="message-suggestions">
+                                    <button class="suggestion-chip" data-prompt="Crie um sistema de inventário com DataStore">
+                                        📦 Sistema de inventário
+                                    </button>
+                                    <button class="suggestion-chip" data-prompt="Faça um sistema de combate com habilidades">
+                                        ⚔️ Sistema de combate
+                                    </button>
+                                    <button class="suggestion-chip" data-prompt="Crie uma UI de loja com botões funcionais">
+                                        🛒 UI de loja
+                                    </button>
+                                    <button class="suggestion-chip" data-prompt="Analise o projeto e sugira melhorias">
+                                        🔍 Analisar projeto
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Typing Indicator -->
+                    <div class="typing-indicator" id="typingIndicator" style="display:none;">
+                        <div class="message-avatar">
+                            <i class="fas fa-robot"></i>
+                        </div>
+                        <div class="typing-dots">
+                            <span></span>
+                            <span></span>
+                            <span></span>
+                        </div>
+                        <span class="typing-text">Blox AI está pensando<span class="dots">...</span></span>
+                    </div>
+                    
+                    <!-- Input Area -->
+                    <div class="chat-input-container">
+                        <form class="chat-input-form" id="chatForm">
+                            <div class="input-toolbar">
+                                <button type="button" class="toolbar-btn" title="Anexar arquivo">
+                                    <i class="fas fa-paperclip"></i>
+                                </button>
+                                <button type="button" class="toolbar-btn" title="Capturar seleção">
+                                    <i class="fas fa-mouse-pointer"></i>
+                                </button>
+                                <button type="button" class="toolbar-btn" title="Escanear projeto">
+                                    <i class="fas fa-search-plus"></i>
+                                </button>
+                                <div class="toolbar-spacer"></div>
+                                <button type="button" class="toolbar-btn" title="Modo avançado">
+                                    <i class="fas fa-magic"></i>
+                                </button>
+                            </div>
+                            
+                            <div class="input-wrapper">
+                                <textarea 
+                                    id="chatInput" 
+                                    placeholder="Pergunte algo ou descreva o que você quer criar..."
+                                    rows="1"
+                                    maxlength="4000"
+                                ></textarea>
+                                <div class="input-footer">
+                                    <div class="input-info">
+                                        <span id="charCount">0</span>/4000
+                                    </div>
+                                    <div class="input-actions">
+                                        <button type="button" class="btn-icon" title="Gravar áudio">
+                                            <i class="fas fa-microphone"></i>
+                                        </button>
+                                        <button type="submit" class="btn-send" id="sendBtn">
+                                            <i class="fas fa-paper-plane"></i>
+                                            <span>Enviar</span>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Section: Explorer (Tree View) -->
+            <section class="content-section" id="section-explorer">
+                <div class="explorer-container">
+                    <div class="explorer-header">
+                        <h2><i class="fas fa-sitemap"></i> Explorador do Jogo</h2>
+                        <p>Visualize a estrutura completa do projeto que o agente de IA está analisando</p>
+                    </div>
+                    
+                    <div class="explorer-toolbar">
+                        <div class="search-box">
+                            <i class="fas fa-search"></i>
+                            <input type="text" id="treeSearch" placeholder="Buscar serviços, scripts, instâncias...">
+                        </div>
+                        <div class="filter-group">
+                            <button class="filter-btn active" data-filter="all">Tudo</button>
+                            <button class="filter-btn" data-filter="scripts">Scripts</button>
+                            <button class="filter-btn" data-filter="parts">Parts</button>
+                            <button class="filter-btn" data-filter="ui">UIs</button>
+                            <button class="filter-btn" data-filter="models">Models</button>
+                        </div>
+                        <div class="toolbar-actions">
+                            <button class="icon-btn" id="expandAllBtn" title="Expandir tudo">
+                                <i class="fas fa-expand-arrows-alt"></i>
+                            </button>
+                            <button class="icon-btn" id="collapseAllBtn" title="Recolher tudo">
+                                <i class="fas fa-compress-arrows-alt"></i>
+                            </button>
+                            <button class="icon-btn" id="refreshTreeBtn" title="Atualizar">
+                                <i class="fas fa-sync-alt"></i>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="tree-view" id="treeView">
+                        <!-- Tree will be rendered here -->
+                        <div class="tree-loading">
+                            <i class="fas fa-spinner fa-spin"></i>
+                            Carregando estrutura do projeto...
+                        </div>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Section: Projects -->
+            <section class="content-section" id="section-projects">
+                <div class="projects-container">
+                    <div class="section-header">
+                        <h2><i class="fas fa-folder-open"></i> Meus Projetos</h2>
+                        <button class="btn btn-primary" id="newProjectBtn">
+                            <i class="fas fa-plus"></i> Novo Projeto
+                        </button>
+                    </div>
+                    <div class="projects-grid" id="projectsGrid">
+                        <!-- Projects will be loaded here -->
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Section: History -->
+            <section class="content-section" id="section-history">
+                <div class="history-container">
+                    <div class="section-header">
+                        <h2><i class="fas fa-history"></i> Histórico de Conversas</h2>
+                        <div class="header-actions">
+                            <input type="search" id="historySearch" placeholder="Buscar no histórico...">
+                            <button class="btn btn-secondary" id="clearHistoryBtn">
+                                <i class="fas fa-trash"></i> Limpar Tudo
+                            </button>
+                        </div>
+                    </div>
+                    <div class="history-list" id="historyList">
+                        <!-- History will be loaded here -->
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Section: Documentation -->
+            <section class="content-section" id="section-docs">
+                <div class="docs-container">
+                    <div class="section-header">
+                        <h2><i class="fas fa-book"></i> Documentação & Recursos</h2>
+                    </div>
+                    
+                    <div class="docs-layout">
+                        <!-- Sidebar -->
+                        <aside class="docs-sidebar">
+                            <div class="docs-search">
+                                <i class="fas fa-search"></i>
+                                <input type="text" id="docsSearch" placeholder="Buscar documentação...">
+                            </div>
+                            <nav class="docs-nav">
+                                <a href="#getting-started" class="docs-nav-item active">🚀 Começando</a>
+                                <a href="#guides" class="docs-nav-item">📚 Guias</a>
+                                <a href="#api" class="docs-nav-item">🔌 API Reference</a>
+                                <a href="#examples" class="docs-nav-item">💡 Exemplos</a>
+                                <a href="#best-practices" class="docs-nav-item">⭐ Boas Práticas</a>
+                                <a href="#troubleshooting" class="docs-nav-item">🔧 Troubleshooting</a>
+                            </nav>
+                        </aside>
+                        
+                        <!-- Content -->
+                        <div class="docs-content" id="docsContent">
+                            <!-- Docs will be loaded here -->
+                        </div>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Section: Settings -->
+            <section class="content-section" id="section-settings">
+                <div class="settings-container">
+                    <h2><i class="fas fa-cog"></i> Configurações</h2>
+                    
+                    <div class="settings-tabs">
+                        <button class="settings-tab active" data-tab="profile">Perfil</button>
+                        <button class="settings-tab" data-tab="api-keys">API Keys</button>
+                        <button class="settings-tab" data-tab="preferences">Preferências</button>
+                        <button class="settings-tab" data-tab="billing">Cobrança</button>
+                        <button class="settings-tab" data-tab="security">Segurança</button>
+                    </div>
+                    
+                    <div class="settings-content">
+                        <!-- Profile Tab -->
+                        <div class="settings-panel active" id="panel-profile">
+                            <h3>Perfil</h3>
+                            <form id="profileForm">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>Nome</label>
+                                        <input type="text" id="firstNameInput" name="firstName">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Sobrenome</label>
+                                        <input type="text" id="lastNameInput" name="lastName">
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label>Email</label>
+                                    <input type="email" id="emailInput" name="email" disabled>
+                                </div>
+                                <div class="form-group">
+                                    <label>Idioma</label>
+                                    <select id="languageSelect">
+                                        <option value="pt-BR">Português (Brasil)</option>
+                                        <option value="en-US">English (US)</option>
+                                        <option value="es-ES">Español</option>
+                                    </select>
+                                </div>
+                                <button type="submit" class="btn btn-primary">Salvar Alterações</button>
+                            </form>
+                        </div>
+                        
+                        <!-- API Keys Tab -->
+                        <div class="settings-panel" id="panel-api-keys">
+                            <h3>API Keys dos Providers</h3>
+                            <p class="panel-description">
+                                Configure suas próprias API keys para usar diferentes provedores de IA.
+                                Suas chaves são criptografadas e nunca compartilhadas.
+                            </p>
+                            
+                            <div class="api-key-cards" id="apiKeyCards">
+                                <!-- API key cards will be rendered here -->
+                            </div>
+                        </div>
+                        
+                        <!-- Preferences Tab -->
+                        <div class="settings-panel" id="panel-preferences">
+                            <h3>Preferências do Agente</h3>
+                            <form id="preferencesForm">
+                                <div class="form-group">
+                                    <label>Provider Padrão</label>
+                                    <select id="defaultProvider">
+                                        <option value="blox">Blox AI (Padrão)</option>
+                                        <option value="openai">OpenAI</option>
+                                        <option value="gemini">Google Gemini</option>
+                                        <option value="kimi">Moonshot Kimi</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Modelo Padrão</label>
+                                    <select id="defaultModel">
+                                        <option value="fast">Rápido (menor qualidade)</option>
+                                        <option value="balanced" selected>Balanceado (recomendado)</option>
+                                        <option value="powerful">Poderoso (mais lento)</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Temperatura: <span id="tempValue">0.1</span></label>
+                                    <input type="range" id="temperatureSlider" min="0" max="2" step="0.1" value="0.1">
+                                    <small>Menor = mais preciso, Maior = mais criativo</small>
+                                </div>
+                                <div class="form-group">
+                                    <label>
+                                        <input type="checkbox" id="autoApplyCheck">
+                                        Aplicar mudanças automaticamente
+                                    </label>
+                                </div>
+                                <div class="form-group">
+                                    <label>
+                                        <input type="checkbox" id="confirmEditCheck" checked>
+                                        Pedir confirmação antes de editar
+                                    </label>
+                                </div>
+                                <button type="submit" class="btn btn-primary">Salvar</button>
+                            </form>
+                        </div>
+                        
+                        <!-- Billing Tab -->
+                        <div class="settings-panel" id="panel-billing">
+                            <h3>Cobrança & Assinatura</h3>
+                            <div class="billing-info" id="billingInfo">
+                                <!-- Billing info will be loaded here -->
+                            </div>
+                        </div>
+                        
+                        <!-- Security Tab -->
+                        <div class="settings-panel" id="panel-security">
+                            <h3>Segurança</h3>
+                            <form id="passwordChangeForm">
+                                <div class="form-group">
+                                    <label>Senha Atual</label>
+                                    <input type="password" id="currentPassword" required>
+                                </div>
+                                <div class="form-group">
+                                    <label>Nova Senha</label>
+                                    <input type="password" id="newPassword" required minlength="8">
+                                </div>
+                                <div class="form-group">
+                                    <label>Confirmar Nova Senha</label>
+                                    <input type="password" id="confirmNewPassword" required>
+                                </div>
+                                <button type="submit" class="btn btn-primary">Alterar Senha</button>
+                            </form>
+                            
+                            <hr>
+                            
+                            <h3>API Key do Plugin</h3>
+                            <p>Use esta chave no plugin do Roblox Studio para autenticar.</p>
+                            <div class="api-key-display">
+                                <input type="password" id="pluginApiKey" readonly>
+                                <button class="btn btn-secondary" id="showApiKeyBtn">
+                                    <i class="fas fa-eye"></i>
+                                </button>
+                                <button class="btn btn-secondary" id="copyApiKeyBtn">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                                <button class="btn btn-danger" id="regenerateApiKeyBtn">
+                                    <i class="fas fa-sync"></i> Regenerar
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+    
+    <!-- Modals -->
+    <div class="modal" id="upgradeModal">
+        <div class="modal-content">
+            <button class="modal-close" data-close="upgradeModal">
+                <i class="fas fa-times"></i>
+            </button>
+            <h2>Escolha seu plano</h2>
+            <div class="plans-grid" id="plansGrid">
+                <!-- Plans will be loaded here -->
+            </div>
+        </div>
+    </div>
+    
+    <!-- Toast Container -->
+    <div id="toastContainer" class="toast-container"></div>
+    
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loadingOverlay" style="display:none;">
+        <div class="loading-spinner">
+            <div class="spinner"></div>
+            <p id="loadingText">Carregando...</p>
+        </div>
+    </div>
+    
+    <!-- Scripts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="/js/api.js"></script>
+    <script src="/js/auth.js"></script>
+    <script src="/js/chat.js"></script>
+    <script src="/js/tree-view.js"></script>
+    <script src="/js/docs.js"></script>
+    <script src="/js/dashboard.js"></script>
+    <script src="/js/main.js"></script>
+</body>
+</html>
