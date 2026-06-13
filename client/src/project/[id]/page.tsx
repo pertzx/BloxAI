@@ -1,4 +1,3 @@
-"use client";
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { 
   Folder, MessageSquare,
@@ -119,7 +118,7 @@ type OptimisticAssistantState = {
 const CHAT_INPUT_LIMIT = 12000;
 const CHAT_REFERENCE_REGEX = /\('((?:\\.|[^'])*)',\s*"((?:\\.|[^"])*)"\)/g;
 const EXECUTION_REFERENCE_REGEX = /(executionId:\d+)/g;
-const SUPPORTED_MODEL_OPTIONS = ['DeepSeek-V3', 'GPT-5.4 Mini', 'Claude 3.5'] as const;
+const SUPPORTED_MODEL_OPTIONS = ['DeepSeek-V3', 'GPT-5.4 Mini'] as const;
 
 export default function ProjectView({ params }: { params: { id: string } }) {
   const [project, setProject] = useState<any>(null);
@@ -129,7 +128,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
   const [input, setInput] = useState('');
   const [nodes, setNodes] = useState<WorkspaceNode[]>([]);
   const [selectedNode, setSelectedNode] = useState<WorkspaceNode | null>(null);
-  const [mainPanelView, setMainPanelView] = useState<'chat' | 'script'>('chat');
+  const [mainPanelView, setMainPanelView] = useState<'explorer' | 'chat' | 'script' | 'timeline'>('chat');
   const [activeSidebarTab, setActiveSidebarTab] = useState<'explorer' | 'chat' | 'timeline' | 'script'>('chat');
   const [selectedModel, setSelectedModel] = useState('GPT-5.4 Mini');
   const [agentMode, setAgentMode] = useState<'instant' | 'think'>('instant');
@@ -140,7 +139,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
   const [hiddenChatIds, setHiddenChatIds] = useState<string[]>([]);
   const [selectedExplorerPaths, setSelectedExplorerPaths] = useState<string[]>([]);
   const [collapsedPaths, setCollapsedPaths] = useState<string[]>([]);
-  const [isExplorerPaneCollapsed, setIsExplorerPaneCollapsed] = useState(false);
+  const [isExplorerPaneCollapsed, setIsExplorerPaneCollapsed] = useState(true);
   const [isExplorerTreeCollapsed, setIsExplorerTreeCollapsed] = useState(false);
   const [isInspectorCollapsed, setIsInspectorCollapsed] = useState(false);
   const [isChatListCollapsed, setIsChatListCollapsed] = useState(false);
@@ -603,6 +602,9 @@ export default function ProjectView({ params }: { params: { id: string } }) {
     setActiveSidebarTab(tab);
 
     if (tab === 'chat') {
+      setIsExplorerPaneCollapsed(true);
+      setIsExplorerTreeCollapsed(true);
+      setIsInspectorCollapsed(true);
       setMainPanelView('chat');
       setIsChatTimelineCollapsed(true);
     }
@@ -620,6 +622,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
     }
 
     if (tab === 'explorer') {
+      setMainPanelView('explorer');
       setIsExplorerPaneCollapsed(false);
       setIsExplorerTreeCollapsed(false);
       setIsInspectorCollapsed(false);
