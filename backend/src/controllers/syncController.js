@@ -1,59 +1,38 @@
-import { Project } from '../models/Project.js';
+import Project from "../models/Project.js";
 
-function normalizeNode(node) {
-  if (!node || typeof node !== 'object') return null;
-
-  const nome = typeof node.nome === 'string' ? node.nome.trim() : '';
-  const propriedades = node.propriedades && typeof node.propriedades === 'object' ? node.propriedades : {};
-  const filhos = Array.isArray(node.filhos) ? node.filhos.map(normalizeNode).filter(Boolean) : [];
-
-  if (!nome) return null;
-
-  const normalizedProps = Object.fromEntries(
-    Object.entries(propriedades).filter(([key, value]) => typeof key === 'string' && value !== undefined)
-  );
-
-  return { nome, propriedades: normalizedProps, filhos };
-}
-
-function countNodes(nodes = []) {
-  return nodes.reduce((acc, node) => acc + 1 + countNodes(Array.isArray(node?.filhos) ? node.filhos : []), 0);
-}
-
-export const getSyncState = async (req, res) => {
+export const getTree = async (req, res) => {
   try {
-    res.json({ success: true, diffs: [] });
+    const project = await Project.findOne({ 
+      _id: req.params.projectId, 
+      owner: req.userId 
+    });
+
+    if (!project) {
+      return res.status(404).json({ message: "Projeto não encontrado" });
+    }
+
+    res.json({ tree: project.tree || [] });
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao sincronizar estado' });
+    res.status(500).json({ message: error.message });
   }
 };
 
-export const postSyncState = async (req, res) => {
+export const updateTree = async (req, res) => {
   try {
-    const project = await Project.findOne({ _id: req.params.id, owner: req.user.id });
+    const { tree } = req.body;
+    
+    const project = await Project.findOneAndUpdate(
+      { _id: req.params.projectId, owner: req.userId },
+      { tree, lastEdit: new Date() },
+      { new: true }
+    );
+
     if (!project) {
-      return res.status(404).json({ error: 'Projeto não encontrado' });
+      return res.status(404).json({ message: "Projeto não encontrado" });
     }
 
-    const data = req.body || {};
-    project.lastSync = new Date();
-    project.status = 'Online';
-
-    if (data.type === 'FullSync' && data.tree) {
-      project.workspaceNodes = Array.isArray(data.tree)
-        ? data.tree.map(normalizeNode).filter(Boolean)
-        : [];
-    }
-
-    project.markModified('workspaceNodes');
-    await project.save();
-
-    return res.json({
-      success: true,
-      workspaceNodeCount: countNodes(Array.isArray(project.workspaceNodes) ? project.workspaceNodes : []),
-      lastSync: project.lastSync,
-    });
+    res.json({ tree: project.tree });
   } catch (error) {
-    return res.status(500).json({ error: 'Erro ao receber estado' });
+    res.status(500).json({ message: error.message });
   }
 };

@@ -1,338 +1,275 @@
-"use client";
-import React, { useEffect, useMemo, useState } from 'react';
-import { Bot, Folder, Plus, Search, User, Activity, Cpu, Radio, Clock3, X } from 'lucide-react';
-import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import api from '../api/api.js';
+import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
+import { 
+  Plus, 
+  Search, 
+  Clock, 
+  Zap, 
+  TrendingUp, 
+  AlertCircle,
+  ChevronRight,
+  Terminal,
+  Shield,
+  MoreVertical,
+  Loader2,
+  RefreshCw
+} from "lucide-react";
+import { projectAPI, commandAPI } from "../api/api";
 
-export default function Dashboard() {
-  const [projects, setProjects] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
-  const [isCreateOpen, setIsCreateOpen] = useState(false);
-  const [newProjectName, setNewProjectName] = useState('');
-  const [newProjectPlaceId, setNewProjectPlaceId] = useState('');
-  const [createError, setCreateError] = useState('');
-  const [creating, setCreating] = useState(false);
-  const router = useRouter();
+const ProjectCard = ({ project, onDelete }: { project: any; onDelete: (id: string) => void }) => (
+  <div className="glass-card p-6 block group relative">
+    <div className="flex items-start justify-between mb-4">
+      <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/20 to-secondary/20 border border-primary/20 flex items-center justify-center">
+        <Terminal className="w-5 h-5 text-primary" />
+      </div>
+      <button 
+        onClick={() => onDelete(project._id)}
+        className="p-1.5 rounded-lg hover:bg-error/10 text-text-subtle hover:text-error opacity-0 group-hover:opacity-100 transition-all"
+      >
+        <MoreVertical className="w-4 h-4" />
+      </button>
+    </div>
+    <Link to={`/project/${project._id}`}>
+      <h3 className="text-base font-semibold text-white mb-1 hover:text-primary transition-colors">{project.name}</h3>
+    </Link>
+    <p className="text-xs text-text-subtle mb-4">ID: {project.universeId}</p>
+    <div className="flex items-center justify-between text-xs">
+      <div className="flex items-center gap-1.5">
+        <div className={`w-2 h-2 rounded-full ${project.status === "active" ? "bg-success" : "bg-warning"}`} />
+        <span className="text-text-muted capitalize">{project.status || "active"}</span>
+      </div>
+      <span className="text-text-subtle">
+        {project.lastEdit ? new Date(project.lastEdit).toLocaleDateString() : "Nunca"}
+      </span>
+    </div>
+    <div className="mt-4 pt-4 border-t border-border flex items-center justify-between text-xs">
+      <span className="text-text-subtle">{project.tokensUsed?.toLocaleString() || "0"} tokens</span>
+      <Link to={`/project/${project._id}`}>
+        <ChevronRight className="w-4 h-4 text-text-subtle group-hover:text-primary transition-colors" />
+      </Link>
+    </div>
+  </div>
+);
 
-  const filteredProjects = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    if (!term) return projects;
+const ActivityItem = ({ type, message, time, status }: { type: string; message: string; time: string; status: "success" | "error" | "warning" }) => {
+  const icons = {
+    success: <div className="w-2 h-2 rounded-full bg-success" />,
+    error: <div className="w-2 h-2 rounded-full bg-error" />,
+    warning: <div className="w-2 h-2 rounded-full bg-warning" />,
+  };
 
-    return projects.filter((proj: any) =>
-      String(proj?.name || '').toLowerCase().includes(term) ||
-      String(proj?.placeId || '').toLowerCase().includes(term)
-    );
-  }, [projects, search]);
-
-  const onlineCount = useMemo(() => projects.filter((proj: any) => proj.status === 'Online').length, [projects]);
-  const totalNodes = useMemo(() => projects.reduce((acc: number, proj: any) => acc + countNodes(proj.workspaceNodes || []), 0), [projects]);
-  const totalMessages = useMemo(() => projects.reduce((acc: number, proj: any) => acc + Number(proj.metrics?.messages || 0), 0), [projects]);
-  const totalTokens = useMemo(() => projects.reduce((acc: number, proj: any) => acc + Number(proj.metrics?.totalTokens || 0), 0), [projects]);
-  const totalCost = useMemo(() => projects.reduce((acc: number, proj: any) => acc + Number(proj.metrics?.estimatedCostUsd || 0), 0), [projects]);
-  const recentlySynced = useMemo(
-    () => [...projects].sort((a, b) => new Date(b.lastSync || 0).getTime() - new Date(a.lastSync || 0).getTime()).slice(0, 3),
-    [projects]
+  return (
+    <div className="flex items-start gap-3 py-3">
+      {icons[status]}
+      <div className="flex-1 min-w-0">
+        <p className="text-sm text-text truncate">{message}</p>
+        <p className="text-xs text-text-subtle mt-0.5">{time}</p>
+      </div>
+      <span className="text-xs px-2 py-0.5 rounded-md bg-surface text-text-muted uppercase">{type}</span>
+    </div>
   );
+};
+
+export default function DashboardPage() {
+  const [projects, setProjects] = useState([]);
+  const [commands, setCommands] = useState([]);
+  const [stats, setStats] = useState({ projects: 0, tokens: 0, commands: 0, successRate: 0 });
+  const [searchQuery, setSearchQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    const fetchProjects = async () => {
-      const token = localStorage.getItem('blox_token');
-      console.log(`blox_token: `, token)
-      if (!token) {
+    loadDashboard();
+  }, []);
 
-        setTimeout(() => router.push('/login'), 2000);
-        return;
-      }
-      try {
-        const res = await api.get('/api/projects', {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (res.data) {
-          const data = res.data;
-          setProjects(data);  
-        } else {
-          router.push('/login');
-        }
-      } catch (e) {
-        console.error(e);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchProjects();
-    const interval = setInterval(fetchProjects, 5000);
-    return () => clearInterval(interval);
-  }, [router]);
-
-  const handleCreateProject = async () => {
-    const token = localStorage.getItem('blox_token');
-    const name = newProjectName.trim();
-    const placeId = newProjectPlaceId.trim();
-
-    if (!name || !placeId) {
-      setCreateError('Preencha nome e Place ID.');
-      return;
-    }
-
-    setCreating(true);
-    setCreateError('');
-
+  const loadDashboard = async () => {
     try {
-      const response = await api.post('/api/projects', {
-        headers: { Authorization: `Bearer ${token}` },
-        body: { name, placeId }
-      });
+      setLoading(true);
+      setError("");
+      
+      const projectsRes = await projectAPI.list();
+      const projectsData = projectsRes.data || [];
+      setProjects(projectsData);
 
-      if (!response.ok) {
-        const data = response.data;
-        setCreateError(data?.error || 'Nao foi possivel criar o projeto.');
-        return;
+      // Tenta carregar comandos, mas não quebra se der erro
+      let commandsData = [];
+      try {
+        const commandsRes = await commandAPI.list("all");
+        commandsData = commandsRes.data || [];
+        setCommands(commandsData);
+      } catch (e) {
+        // Se /commands não existir, ignora silenciosamente
+        console.warn("Endpoint /commands indisponível:", e);
       }
 
-      const createdProject = response.data;
-      setProjects((current) => [createdProject, ...current]);
-      setIsCreateOpen(false);
-      setNewProjectName('');
-      setNewProjectPlaceId('');
-    } catch (error) {
-      setCreateError('Erro ao criar projeto.');
+      const totalTokens = projectsData.reduce((acc: number, p: any) => acc + (p.tokensUsed || 0), 0);
+      const totalCommands = commandsData.length;
+      const successCommands = commandsData.filter((c: any) => c.status === "success").length;
+      const successRate = totalCommands > 0 ? Math.round((successCommands / totalCommands) * 100) : 100;
+
+      setStats({
+        projects: projectsData.length,
+        tokens: totalTokens,
+        commands: totalCommands,
+        successRate,
+      });
+    } catch (err: any) {
+      setError(err.response?.data?.message || "Erro ao carregar dashboard");
     } finally {
-      setCreating(false);
+      setLoading(false);
     }
   };
 
+  const handleDelete = async (id: string) => {
+    if (!confirm("Tem certeza que deseja excluir este projeto?")) return;
+    try {
+      await projectAPI.delete(id);
+      setProjects((prev) => prev.filter((p: any) => p._id !== id));
+    } catch (err: any) {
+      alert(err.response?.data?.message || "Erro ao excluir projeto");
+    }
+  };
+
+  const filteredProjects = projects.filter((p: any) => 
+    p.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    p.universeId?.includes(searchQuery)
+  );
+
+  const statItems = [
+    { label: "Projetos", value: stats.projects.toString(), icon: Terminal, trend: "Total" },
+    { label: "Tokens", value: stats.tokens >= 1000 ? `${(stats.tokens / 1000).toFixed(1)}k` : stats.tokens.toString(), icon: Zap, trend: "Usados" },
+    { label: "Comandos", value: stats.commands.toLocaleString(), icon: TrendingUp, trend: "Exec." },
+    { label: "Sucesso", value: `${stats.successRate}%`, icon: Shield, trend: "Taxa" },
+  ];
+
   if (loading) {
-    return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-white">Carregando...</div>;
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="w-8 h-8 text-primary animate-spin" />
+      </div>
+    );
   }
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white flex flex-col">
-      <header className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/50 backdrop-blur">
-        <div className="flex items-center space-x-2">
-          <Bot className="w-8 h-8 text-blue-500" />
-          <h1 className="text-xl font-bold">Blox AI Dashboard</h1>
+    <div className="space-y-8 animate-slide-up">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold text-white mb-1">Dashboard</h1>
+          <p className="text-text-muted">Visão geral dos seus projetos e consumo</p>
         </div>
-        <div className="flex items-center space-x-4">
-          <button
-            onClick={() => setIsCreateOpen(true)}
-            className="flex items-center space-x-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium transition-colors hover:bg-blue-700"
+        <div className="flex items-center gap-3">
+          <button 
+            onClick={loadDashboard}
+            className="ghost-button p-3"
+            title="Recarregar"
           >
-            <Plus className="w-4 h-4" />
-            <span>Novo Projeto</span>
+            <RefreshCw className="w-5 h-5" />
           </button>
-          <button className="p-2 hover:bg-slate-800 rounded-full transition-colors" onClick={() => { localStorage.removeItem('blox_token'); router.push('/'); }}>
-            <User className="w-5 h-5 text-slate-300" />
-          </button>
+          <Link to="/project/new" className="glow-button flex items-center gap-2">
+            <Plus className="w-5 h-5" />
+            Novo Projeto
+          </Link>
         </div>
-      </header>
+      </div>
 
-      <main className="flex-1 p-8 max-w-7xl mx-auto w-full">
-        <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <h2 className="text-2xl font-semibold flex items-center">
-            <Folder className="w-6 h-6 mr-2 text-slate-400" />
-            Meus Projetos
-          </h2>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-6">
-            <OverviewCard icon={<Folder className="h-4 w-4" />} label="Projetos" value={String(projects.length)} />
-            <OverviewCard icon={<Radio className="h-4 w-4" />} label="Online Agora" value={String(onlineCount)} />
-            <OverviewCard icon={<Cpu className="h-4 w-4" />} label="Nodes Totais" value={String(totalNodes)} />
-            <OverviewCard icon={<Bot className="h-4 w-4" />} label="Mensagens" value={String(totalMessages)} />
-            <OverviewCard icon={<Activity className="h-4 w-4" />} label="Tokens" value={formatCompactNumber(totalTokens)} />
-            <OverviewCard icon={<Activity className="h-4 w-4" />} label="Custo" value={`US$ ${totalCost.toFixed(2)}`} />
-            <OverviewCard
-              icon={<Activity className="h-4 w-4" />}
-              label="Atividade"
-              value={recentlySynced[0]?.lastSync ? formatRelativeTime(recentlySynced[0].lastSync) : 'Sem sync'}
-            />
-          </div>
+      {error && (
+        <div className="p-4 rounded-lg bg-error/10 border border-error/20 text-error text-sm flex items-center justify-between">
+          <span>{error}</span>
+          <button onClick={loadDashboard} className="text-xs underline">Tentar novamente</button>
         </div>
+      )}
 
-        <div className="mb-6 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <div className="flex flex-col gap-3 rounded-2xl border border-slate-800 bg-slate-950/70 p-4 md:flex-row md:items-center md:justify-between">
-            <div>
-              <div className="text-sm font-medium text-white">Explorer dos projetos</div>
-              <div className="text-xs text-slate-400">Filtre por nome ou `Place ID` para abrir mais rapido.</div>
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {statItems.map((stat) => (
+          <div key={stat.label} className="glass-card p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="w-10 h-10 rounded-xl bg-surface border border-border flex items-center justify-center">
+                <stat.icon className="w-5 h-5 text-primary" />
+              </div>
+              <span className="text-xs text-success font-medium bg-success/10 px-2 py-1 rounded-md">
+                {stat.trend}
+              </span>
             </div>
-            <div className="relative w-full md:max-w-sm">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <div className="text-2xl font-bold text-white mb-1">{stat.value}</div>
+            <div className="text-sm text-text-muted">{stat.label}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-white">Seus Projetos</h2>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-subtle" />
               <input
                 type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Buscar por nome ou Place ID"
-                className="w-full rounded-xl border border-slate-800 bg-slate-900 pl-9 pr-4 py-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Buscar..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="input-glass pl-10 py-2 text-sm w-64"
               />
             </div>
           </div>
 
-          <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-            <div className="text-sm font-medium text-white">Recentes</div>
-            <div className="mt-1 text-xs text-slate-400">Últimos projetos com atividade de sync.</div>
-            <div className="mt-3 space-y-3">
-              {recentlySynced.map((proj: any) => (
-                <Link key={proj._id} href={`/project/${proj._id}`} className="block rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2 transition hover:border-slate-700 hover:bg-slate-900">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-sm font-medium text-white">{proj.name}</span>
-                    <span className={`rounded-full px-2 py-0.5 text-[10px] ${proj.status === 'Online' ? 'bg-green-500/10 text-green-300' : 'bg-slate-800 text-slate-400'}`}>
-                      {proj.status}
-                    </span>
-                  </div>
-                  <div className="mt-2 flex items-center gap-2 text-[11px] text-slate-400">
-                    <Clock3 className="h-3.5 w-3.5" />
-                    {proj.lastSync ? formatRelativeTime(proj.lastSync) : 'Sem sync'}
-                  </div>
-                </Link>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-          {filteredProjects.length === 0 ? (
-            <div className="col-span-3 rounded-2xl border border-dashed border-slate-800 bg-slate-950/40 py-16 text-center text-slate-500">
-              Nenhum projeto encontrado. Crie um novo para comecar.
-            </div>
-          ) : (
-            filteredProjects.map((proj: any) => (
-              <Link href={`/project/${proj._id}`} key={proj._id} className="block rounded-2xl border border-slate-700 bg-slate-800 p-5 transition-colors group hover:border-slate-600">
-                <div className="mb-4 flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <h3 className="truncate text-lg font-medium transition-colors group-hover:text-blue-400">{proj.name}</h3>
-                    <p className="mt-1 text-xs text-slate-400">Place ID: {proj.placeId}</p>
-                  </div>
-                  <div className="flex items-center space-x-1 rounded-full bg-slate-900/70 px-2 py-1 text-xs text-slate-300">
-                    <span className={`w-2 h-2 rounded-full ${proj.status === 'Online' ? 'bg-green-500 animate-pulse' : 'bg-slate-500'}`}></span>
-                    <span>{proj.status}</span>
-                  </div>
-                </div>
-                <div className="mb-4 grid grid-cols-2 gap-3 text-sm">
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/60 px-3 py-2">
-                    <div className="text-[10px] uppercase tracking-wide text-slate-500">Nodes</div>
-                    <div className="mt-1 font-medium text-slate-100">{countNodes(proj.workspaceNodes || [])}</div>
-                  </div>
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/60 px-3 py-2">
-                    <div className="text-[10px] uppercase tracking-wide text-slate-500">Última atividade</div>
-                    <div className="mt-1 font-medium text-slate-100">{proj.lastSync ? formatRelativeTime(proj.lastSync) : 'Nunca'}</div>
-                  </div>
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/60 px-3 py-2">
-                    <div className="text-[10px] uppercase tracking-wide text-slate-500">Mensagens</div>
-                    <div className="mt-1 font-medium text-slate-100">{proj.metrics?.messages || 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/60 px-3 py-2">
-                    <div className="text-[10px] uppercase tracking-wide text-slate-500">Custo</div>
-                    <div className="mt-1 font-medium text-slate-100">US$ {Number(proj.metrics?.estimatedCostUsd || 0).toFixed(2)}</div>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between gap-3 text-sm">
-                  <span className="truncate text-slate-500">
-                    Tokens: {formatCompactNumber(Number(proj.metrics?.totalTokens || 0))} • Sync: {proj.lastSync ? new Date(proj.lastSync).toLocaleString() : 'Nunca'}
-                  </span>
-                  <span className="font-medium text-blue-400 group-hover:text-blue-300">Abrir Projeto &rarr;</span>
-                </div>
-              </Link>
-            ))
-          )}
-        </div>
-      </main>
-
-      {isCreateOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-3xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-lg font-semibold text-white">Novo Projeto</div>
-                <div className="mt-1 text-sm text-slate-400">Crie um projeto para conectar com o plugin do Studio.</div>
+          <div className="grid sm:grid-cols-2 gap-4">
+            {filteredProjects.map((project: any) => (
+              <ProjectCard key={project._id} project={project} onDelete={handleDelete} />
+            ))}
+            <Link to="/project/new" className="glass border-dashed border-2 border-border hover:border-primary/30 hover:bg-primary/5 rounded-2xl p-6 flex flex-col items-center justify-center gap-3 transition-all min-h-[200px]">
+              <div className="w-12 h-12 rounded-xl bg-surface flex items-center justify-center">
+                <Plus className="w-6 h-6 text-text-muted" />
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsCreateOpen(false);
-                  setCreateError('');
-                }}
-                className="rounded-xl border border-slate-700 bg-slate-950 p-2 text-slate-400 transition hover:text-white"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
+              <span className="text-sm text-text-muted font-medium">Criar novo projeto</span>
+            </Link>
+          </div>
+        </div>
 
-            <div className="mt-5 space-y-4">
-              <label className="block">
-                <div className="mb-2 text-xs uppercase tracking-wide text-slate-500">Nome do projeto</div>
-                <input
-                  value={newProjectName}
-                  onChange={(event) => setNewProjectName(event.target.value)}
-                  placeholder="Ex.: OakForest"
-                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </label>
-              <label className="block">
-                <div className="mb-2 text-xs uppercase tracking-wide text-slate-500">Place ID</div>
-                <input
-                  value={newProjectPlaceId}
-                  onChange={(event) => setNewProjectPlaceId(event.target.value)}
-                  placeholder="Ex.: 123456789"
-                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </label>
-              {createError && <div className="text-sm text-rose-300">{createError}</div>}
+        <div className="space-y-4">
+          <div className="glass-card p-6">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-sm font-semibold text-white">Uso de Tokens</h3>
+              <span className="text-xs text-text-muted">Plano Atual</span>
             </div>
+            <div className="relative h-2 bg-surface rounded-full overflow-hidden mb-3">
+              <div 
+                className="absolute inset-y-0 left-0 bg-gradient-to-r from-primary to-secondary rounded-full transition-all"
+                style={{ width: `${Math.min((stats.tokens / 100000) * 100, 100)}%` }}
+              />
+            </div>
+            <div className="flex items-center justify-between text-xs mb-4">
+              <span className="text-text-muted">{stats.tokens.toLocaleString()} / 100k</span>
+              <span className="text-primary font-medium">{Math.round((stats.tokens / 100000) * 100)}%</span>
+            </div>
+            {(stats.tokens / 100000) > 0.75 && (
+              <div className="flex items-center gap-2 p-3 rounded-xl bg-warning/5 border border-warning/20">
+                <AlertCircle className="w-4 h-4 text-warning shrink-0" />
+                <p className="text-xs text-warning/80">Alerta: 75% ativa travas automáticas</p>
+              </div>
+            )}
+          </div>
 
-            <div className="mt-6 flex items-center justify-end gap-3">
-              <button
-                type="button"
-                onClick={() => setIsCreateOpen(false)}
-                className="rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-300 transition hover:border-slate-600 hover:text-white"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={handleCreateProject}
-                disabled={creating}
-                className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-medium text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {creating ? 'Criando...' : 'Criar projeto'}
-              </button>
+          <div className="glass-card p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-semibold text-white">Atividade Recente</h3>
+              <Clock className="w-4 h-4 text-text-subtle" />
+            </div>
+            <div className="divide-y divide-border">
+              {commands.length > 0 ? commands.slice(0, 4).map((cmd: any) => (
+                <ActivityItem 
+                  key={cmd._id}
+                  type={cmd.mode || "think"}
+                  message={cmd.command || "Comando executado"}
+                  time={cmd.createdAt ? new Date(cmd.createdAt).toLocaleString() : "Agora"}
+                  status={cmd.status === "success" ? "success" : cmd.status === "error" ? "error" : "warning"}
+                />
+              )) : (
+                <p className="text-sm text-text-subtle py-4 text-center">Nenhuma atividade recente</p>
+              )}
             </div>
           </div>
         </div>
-      )}
-    </div>
-  );
-}
-
-function OverviewCard({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm">
-      <div className="flex items-center gap-2 text-slate-400">
-        {icon}
-        {label}
       </div>
-      <div className="mt-1 text-xl font-semibold">{value}</div>
     </div>
   );
-}
-
-function countNodes(nodes: any[]): number {
-  return nodes.reduce((acc, node) => acc + 1 + countNodes(Array.isArray(node?.filhos) ? node.filhos : []), 0);
-}
-
-function formatRelativeTime(value?: string) {
-  if (!value) return 'agora';
-  const diff = Date.now() - new Date(value).getTime();
-  const minute = 60 * 1000;
-  const hour = 60 * minute;
-
-  if (diff < minute) return 'agora';
-  if (diff < hour) return `${Math.floor(diff / minute)} min atrás`;
-  if (diff < 24 * hour) return `${Math.floor(diff / hour)} h atrás`;
-  return `${Math.floor(diff / (24 * hour))} d atrás`;
-}
-
-function formatCompactNumber(value: number) {
-  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
-  return String(value);
 }

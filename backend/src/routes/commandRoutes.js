@@ -1,13 +1,10 @@
-import { Router } from 'express';
-import { getNextCommand, reportCommandResult } from '../controllers/commandController.js';
-import { authMiddleware } from '../middlewares/auth.js';
+import express from "express";
+const router = express.Router();
+import { list, create, rollback } from "../controllers/commandController.js";
+import authMiddleware from "../middlewares/auth.js";
 
-const router = Router();
-
-// Endpoint para o plugin puxar a fila
-router.get('/next', authMiddleware, getNextCommand);
-
-// Endpoint para o plugin enviar o resultado
-router.post('/:id/result', authMiddleware, reportCommandResult);
+router.get("/", authMiddleware, list);
+router.post("/", authMiddleware, create);
+router.post("/:id/rollback", authMiddleware, rollback);
 
 export default router;

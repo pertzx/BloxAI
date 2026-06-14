@@ -2,8 +2,8 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { JWT_SECRET } from '../config/env.js';
-import { User } from '../models/User.js';
-import { Project } from '../models/Project.js';
+import User from '../models/User.js';
+import Project from '../models/Project.js';
 
 export const pluginAuth = async (req, res) => {
   try {

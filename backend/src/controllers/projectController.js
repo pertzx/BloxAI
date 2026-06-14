@@ -1,157 +1,79 @@
-import { Project } from '../models/Project.js';
-import { Command } from '../models/Command.js';
-import crypto from 'crypto';
+import Project from "../models/Project.js";
 
-export const getProjects = async (req, res) => {
+export const list = async (req, res) => {
   try {
-    const projects = await Project.find({ owner: req.user.id });
-    const logIntents = await Command.find({
-      action: 'LogIntent',
-      project: { $in: projects.map((item) => item._id) },
-    })
-      .select('project payload createdAt')
-      .lean();
-
-    const now = Date.now();
-    const updatedProjects = await Promise.all(
-      projects.map(async (project) => {
-        const isOnline = now - new Date(project.lastSync).getTime() < 15000;
-
-        if (project.status === 'Online' && !isOnline) {
-          project.status = 'Offline';
-          await project.save();
-        } else if (project.status === 'Offline' && isOnline) {
-          project.status = 'Online';
-          await project.save();
-        }
-
-        return project;
-      })
-    );
-
-    const metricsByProject = new Map();
-    for (const item of logIntents) {
-      const key = String(item.project);
-      const telemetry = item.payload?.aiTelemetry || {};
-      const current = metricsByProject.get(key) || {
-        messages: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        totalTokens: 0,
-        estimatedCostUsd: 0,
-      };
-      current.messages += 1;
-      current.inputTokens += Number(telemetry.inputTokens || 0);
-      current.outputTokens += Number(telemetry.outputTokens || 0);
-      current.totalTokens += Number(telemetry.totalTokens || 0);
-      current.estimatedCostUsd += Number(telemetry.estimatedCostUsd || 0);
-      metricsByProject.set(key, current);
-    }
-
-    res.json(
-      updatedProjects.map((project) => {
-        const metrics = metricsByProject.get(String(project._id)) || {
-          messages: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          totalTokens: 0,
-          estimatedCostUsd: 0,
-        };
-
-        return {
-          ...project.toObject(),
-          metrics: {
-            ...metrics,
-            estimatedCostUsd: Number(metrics.estimatedCostUsd.toFixed(6)),
-          },
-        };
-      })
-    );
+    const projects = await Project.find({ owner: req.userId }).sort({ lastEdit: -1 });
+    res.json(projects);
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao buscar projetos' });
+    res.status(500).json({ message: error.message });
   }
 };
 
-export const createProject = async (req, res) => {
+export const get = async (req, res) => {
   try {
-    const { name, placeId } = req.body;
+    const project = await Project.findOne({ 
+      _id: req.params.id, 
+      owner: req.userId 
+    });
     
-    if (!name || !placeId) {
-      return res.status(400).json({ error: 'Nome e Place ID são obrigatórios' });
+    if (!project) {
+      return res.status(404).json({ message: "Projeto não encontrado" });
     }
-
-    const apiKey = crypto.randomBytes(32).toString('hex');
-
-    const newProject = await Project.create({
-      name,
-      placeId,
-      owner: req.user.id,
-      apiKey
-    });
-
-    res.status(201).json(newProject);
+    
+    res.json(project);
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao criar projeto' });
+    res.status(500).json({ message: error.message });
   }
 };
 
-export const getProjectDetails = async (req, res) => {
+export const create = async (req, res) => {
   try {
-    const project = await Project.findOne({ _id: req.params.id, owner: req.user.id });
-    if (!project) return res.status(404).json({ error: 'Projeto não encontrado' });
-
-    const now = Date.now();
-    const syncAgeMs = now - new Date(project.lastSync).getTime();
-    const isOnline = syncAgeMs < 15000;
-    const isSyncHealthy = syncAgeMs < 10000;
-
-    if (project.status === 'Online' && !isOnline) {
-      project.status = 'Offline';
-      await project.save();
-    } else if (project.status === 'Offline' && isOnline) {
-      project.status = 'Online';
-      await project.save();
-    }
-
-    const latestStudioProject = await Project.findOne({ owner: req.user.id })
-      .sort({ lastSync: -1 })
-      .select('_id name placeId lastSync status')
-      .lean();
-
-    const modelOptions = ['DeepSeek-V3', 'GPT-5.4 Mini', 'Claude 3.5'];
-    const availableModels = modelOptions.filter((model) => {
-      if (model === 'DeepSeek-V3') return Boolean(process.env.DEEPSEEK_API_KEY);
-      if (model === 'GPT-5.4 Mini') return Boolean(process.env.OPENAI_API_KEY);
-      return Boolean(process.env.ANTHROPIC_API_KEY);
+    const { name, universeId } = req.body;
+    
+    const project = new Project({
+      name,
+      universeId,
+      owner: req.userId,
     });
 
-    const hasOtherActiveStudioProject =
-      latestStudioProject &&
-      String(latestStudioProject._id) !== String(project._id) &&
-      now - new Date(latestStudioProject.lastSync).getTime() < 10000;
-
-    res.json({
-      ...project.toObject(),
-      syncAgeMs,
-      isSyncHealthy,
-      syncWarning: isSyncHealthy
-        ? null
-        : 'Projeto desincronizado ha mais de 10 segundos. Nao e seguro executar sem sincronizacao recente.',
-      availableModels,
-      activeStudioProject: hasOtherActiveStudioProject
-        ? {
-            id: String(latestStudioProject._id),
-            name: latestStudioProject.name,
-            placeId: latestStudioProject.placeId,
-            lastSync: latestStudioProject.lastSync,
-          }
-        : null,
-    });
+    await project.save();
+    res.status(201).json(project);
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao buscar detalhes do projeto' });
+    res.status(500).json({ message: error.message });
   }
 };
 
-function countNodes(nodes = []) {
-  return nodes.reduce((acc, node) => acc + 1 + countNodes(Array.isArray(node?.filhos) ? node.filhos : []), 0);
-}
+export const update = async (req, res) => {
+  try {
+    const project = await Project.findOneAndUpdate(
+      { _id: req.params.id, owner: req.userId },
+      { ...req.body, lastEdit: new Date() },
+      { new: true }
+    );
+    
+    if (!project) {
+      return res.status(404).json({ message: "Projeto não encontrado" });
+    }
+    
+    res.json(project);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+export const deleteProject = async (req, res) => {
+  try {
+    const project = await Project.findOneAndDelete({ 
+      _id: req.params.id, 
+      owner: req.userId 
+    });
+    
+    if (!project) {
+      return res.status(404).json({ message: "Projeto não encontrado" });
+    }
+    
+    res.json({ message: "Projeto deletado" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
