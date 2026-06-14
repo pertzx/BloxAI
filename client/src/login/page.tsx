@@ -1,125 +1,82 @@
-import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { Zap, Eye, EyeOff, ArrowRight, Github, Loader2 } from "lucide-react";
-import { useAuth } from "../hooks/useAuth";
+"use client";
+import React, { useState } from 'react';
+import { Bot, ArrowRight } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import api from '../api/api.js';
+import Link from 'next/link';
 
-export default function LoginPage() {
-  const [showPassword, setShowPassword] = useState(false);
-  const [form, setForm] = useState({ email: "", password: "" });
-  const [error, setError] = useState("");
+export default function Login() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const { login } = useAuth();
+  const [error, setError] = useState('');
+  const router = useRouter();
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError("");
     setLoading(true);
-
+    setError('');
     try {
-      await login(form.email, form.password);
-    } catch (err: any) {
-      setError(err.response?.data?.message || "Erro ao fazer login. Tente novamente.");
+      const res = await api.post('/api/auth/login', { email, password });
+      const data = res.data;
+      if (data.token) {
+        localStorage.setItem('blox_token', data.token);
+        router.push('/dashboard');
+      } else {
+        setError(data.error || 'Erro ao fazer login');
+      }
+    } catch (err) {
+      setError('Erro de conexão com o servidor');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-6 relative overflow-hidden">
-      <div className="aurora-bg" />
-      <div className="noise-overlay" />
-
-      <div className="w-full max-w-md relative z-10">
-        <div className="text-center mb-10">
-          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-primary to-secondary flex items-center justify-center shadow-glow mx-auto mb-6">
-            <Zap className="w-7 h-7 text-white" />
-          </div>
-          <h1 className="text-2xl font-bold text-white mb-2">Bem-vindo de volta</h1>
-          <p className="text-text-muted text-sm">Entre na sua conta BloxAI</p>
+    <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+      <div className="w-full max-w-md bg-slate-900 border border-slate-800 p-8 rounded-2xl shadow-2xl">
+        <div className="flex flex-col items-center mb-8">
+          <Bot className="w-12 h-12 text-blue-500 mb-4" />
+          <h2 className="text-2xl font-bold text-white">Entrar no Blox AI</h2>
+          <p className="text-slate-400 mt-2 text-sm text-center">Faça login para gerenciar seus projetos.</p>
         </div>
 
-        <div className="glass-strong p-8">
-          {error && (
-            <div className="mb-4 p-3 rounded-lg bg-error/10 border border-error/20 text-error text-sm">
-              {error}
-            </div>
-          )}
+        {error && <div className="mb-4 p-3 bg-red-500/10 border border-red-500/50 text-red-400 rounded-lg text-sm text-center">{error}</div>}
 
-          <form className="space-y-5" onSubmit={handleSubmit}>
-            <div>
-              <label className="block text-sm font-medium text-text-muted mb-2">Email</label>
-              <input
-                type="email"
-                placeholder="dev@roblox.com"
-                className="input-glass"
-                value={form.email}
-                onChange={(e) => setForm({ ...form, email: e.target.value })}
-                required
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-text-muted mb-2">Senha</label>
-              <div className="relative">
-                <input
-                  type={showPassword ? "text" : "password"}
-                  placeholder="••••••••"
-                  className="input-glass pr-12"
-                  value={form.password}
-                  onChange={(e) => setForm({ ...form, password: e.target.value })}
-                  required
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-4 top-1/2 -translate-y-1/2 text-text-subtle hover:text-text transition-colors"
-                >
-                  {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
-                </button>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between text-sm">
-              <label className="flex items-center gap-2 text-text-muted cursor-pointer">
-                <input type="checkbox" className="rounded border-border bg-surface text-primary focus:ring-primary/20" />
-                Lembrar-me
-              </label>
-              <a href="#" className="text-primary hover:text-primary-hover transition-colors">
-                Esqueceu a senha?
-              </a>
-            </div>
-
-            <button 
-              type="submit" 
-              disabled={loading}
-              className="glow-button w-full justify-center flex items-center gap-2 disabled:opacity-60"
-            >
-              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
-              {loading ? "Entrando..." : "Entrar"}
-            </button>
-          </form>
-
-          <div className="relative my-6">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-border" />
-            </div>
-            <div className="relative flex justify-center text-xs">
-              <span className="px-3 bg-background text-text-subtle">ou continue com</span>
-            </div>
+        <form onSubmit={handleLogin} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-1">Email</label>
+            <input 
+              type="email" 
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
+              placeholder="seu@email.com"
+            />
           </div>
-
-          <button className="ghost-button w-full justify-center flex items-center gap-2 text-sm">
-            <Github className="w-5 h-5" />
-            GitHub
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-1">Senha</label>
+            <input 
+              type="password" 
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
+              placeholder="••••••••"
+            />
+          </div>
+          <button 
+            type="submit" 
+            disabled={loading}
+            className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold py-3 rounded-lg transition disabled:opacity-50 mt-4"
+          >
+            {loading ? 'Conectando...' : 'Entrar'} <ArrowRight className="w-4 h-4" />
           </button>
+        </form>
+        <div className="mt-6 text-center text-sm text-slate-400">
+          Não tem uma conta? <Link href="/register" className="text-blue-400 hover:text-blue-300">Crie aqui</Link>
         </div>
-
-        <p className="text-center text-sm text-text-muted mt-8">
-          Não tem uma conta?{" "}
-          <Link to="/register" className="text-primary hover:text-primary-hover font-medium transition-colors">
-            Criar conta
-          </Link>
-        </p>
       </div>
     </div>
   );

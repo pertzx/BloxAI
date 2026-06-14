@@ -1,11 +1,9 @@
-import express from "express";
-import {register, login, me} from "../controllers/authController.js";
-import authMiddleware from "../middlewares/auth.js";
+import { Router } from 'express';
+import { login, register } from '../controllers/authController.js';
 
-const router = express.Router();
+const router = Router();
 
-router.post("/register", register);
-router.post("/login", login);
-router.get("/me", authMiddleware, me); // ← NOVO
+router.post('/login', login);
+router.post('/register', register);
 
 export default router;

@@ -1,46 +1,36 @@
-import express from "express";
-import cors from "cors";
-import mongoose from "mongoose";
-import dotenv from "dotenv";
+import express from 'express';
+import cors from 'cors';
+import { createServer } from 'http';
+import { connectDB } from './config/db.js';
+import authRoutes from './routes/authRoutes.js';
+import projectRoutes from './routes/projectRoutes.js';
+import commandRoutes from './routes/commandRoutes.js';
+import pluginRoutes from './routes/pluginRoutes.js';
 
-dotenv.config();
+// Conectar ao Banco de Dados
+connectDB();
 
 const app = express();
+const httpServer = createServer(app);
 
-// Middleware
+// Middlewares
 app.use(cors());
-app.use(express.json());
-
-// Database
-mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/bloxai")
-  .then(() => console.log("MongoDB conectado"))
-  .catch((err) => console.error("MongoDB erro:", err));
+app.use(express.json(
+  {
+    limit: '50mb',
+    extended: true,
+  }
+));
 
 // Routes
-import authRoutes from "./routes/authRoutes.js";
-import projectRoutes from "./routes/projectRoutes.js";
-import chatRoutes from "./routes/chatRoutes.js";
-import commandRoutes from "./routes/commandRoutes.js";
-import syncRoutes from "./routes/syncRoutes.js";
-import pluginRoutes from "./routes/pluginRoutes.js";
+app.use('/api/auth', authRoutes);
+app.use('/api/plugin', pluginRoutes);
+app.use('/api/projects', projectRoutes);
+app.use('/api/commands', commandRoutes);
 
-app.use("/api/auth", authRoutes);
-app.use("/api/projects", projectRoutes);
-app.use("/api/chat", chatRoutes);        // NOVO
-app.use("/api/commands", commandRoutes);  // NOVO
-app.use("/api/sync", syncRoutes);        // NOVO
-app.use("/api/plugin", pluginRoutes);
-
-// Health check
-app.get("/api/health", (req, res) => res.json({ status: "ok" }));
-
-// Error handler
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ message: "Erro interno do servidor" });
+// Basic health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', message: 'Blox AI Backend Running' });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Backend rodando na porta ${PORT}`));
-
-export default app;
+export { app, httpServer };
