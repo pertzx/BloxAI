@@ -44,6 +44,7 @@ type AdminPlan = {
   marginPercent: number | null;
   monthlyCreditUsd: number;
   signupBonusUsd: number;
+  stripePriceId: string;
   features: PlanFeatures;
   highlight: boolean;
   order: number;
@@ -848,6 +849,7 @@ function PlanEditorModal({ plan, token, onClose, onDone }: { plan: AdminPlan | n
   const [marginPercent, setMarginPercent] = useState(String(plan?.marginPercent ?? ''));
   const [monthlyCreditUsd, setMonthlyCreditUsd] = useState(String(plan?.monthlyCreditUsd ?? ''));
   const [signupBonusUsd, setSignupBonusUsd] = useState(String(plan?.signupBonusUsd ?? ''));
+  const [stripePriceId, setStripePriceId] = useState(plan?.stripePriceId ?? '');
   const [features, setFeatures] = useState<PlanFeatures>(plan?.features ?? { ideaGenerator: false, thinkMode: true, prioritySupport: false });
   const [order, setOrder] = useState(String(plan?.order ?? 0));
   const [highlight, setHighlight] = useState(plan?.highlight ?? false);
@@ -878,6 +880,7 @@ function PlanEditorModal({ plan, token, onClose, onDone }: { plan: AdminPlan | n
       marginPercent: useGlobalMargin ? null : Number(marginPercent),
       monthlyCreditUsd: Number(monthlyCreditUsd) || 0,
       signupBonusUsd: Number(signupBonusUsd) || 0,
+      stripePriceId: stripePriceId.trim(),
       features,
       order: Number(order) || 0,
       highlight, active, isDefault,
@@ -943,6 +946,13 @@ function PlanEditorModal({ plan, token, onClose, onDone }: { plan: AdminPlan | n
             <input type="number" value={order} onChange={(e) => setOrder(e.target.value)} className="input" placeholder="0" />
           </Field>
         </div>
+
+        {planType === 'recurring' && (
+          <Field label="Stripe Price ID (para cobrança)">
+            <input value={stripePriceId} onChange={(e) => setStripePriceId(e.target.value)} className="input" placeholder="price_1Tf7..." />
+            <p className="text-[11px] text-slate-500 mt-1.5">Crie um produto recorrente no Stripe e cole o ID do Price aqui. Sem isso, o plano não pode ser comprado.</p>
+          </Field>
+        )}
 
         <Field label="Margem de lucro">
           <div className="flex items-center gap-2.5 mb-2 cursor-pointer" onClick={() => setUseGlobalMargin((v) => !v)}>

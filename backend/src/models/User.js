@@ -32,6 +32,11 @@ const userSchema = new mongoose.Schema({
   walletStartUsd: { type: Number, default: 0 },
   marginPercent: { type: Number, default: null },
 
+  // ── Assinatura Stripe (planos recorrentes) ────────────────────────────────
+  stripeCustomerId: { type: String, default: null },
+  stripeSubscriptionId: { type: String, default: null },
+  subscriptionStatus: { type: String, default: null }, // active, past_due, canceled...
+
   // ── Auditoria lifetime ────────────────────────────────────────────────────
   totalRealCostUsd: { type: Number, default: 0 },
   totalChargedUsd: { type: Number, default: 0 },

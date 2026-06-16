@@ -1,6 +1,6 @@
 import nodemailer from 'nodemailer';
 import EmailQueue from '../models/EmailQueue.js';
-import { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM, FRONTEND_URL } from '../config/env.js';
+import { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM, API_URL } from '../config/env.js';
 
 const MAX_ATTEMPTS = 5;
 const RETRY_DELAYS = [60, 300, 900, 3600, 7200];
@@ -107,7 +107,8 @@ export function startEmailQueueWorker(intervalMs = 60_000) {
 
 export const EmailService = {
   async sendVerification({ to, token }) {
-    const link = `${FRONTEND_URL}/auth/verify-email?token=${token}`;
+    // Link aponta direto para o backend (hop único), que verifica e redireciona ao frontend.
+    const link = `${API_URL}/api/auth/verify-email?token=${token}`;
     console.log(`[EmailService] Enviando verificação para ${to}...`);
     await enqueue({
       to,
@@ -126,7 +127,8 @@ export const EmailService = {
   },
 
   async sendRecovery({ to, token, robloxUsername }) {
-    const link = `${FRONTEND_URL}/auth/recover?token=${token}`;
+    // Link aponta direto para o backend, que valida e redireciona ao frontend.
+    const link = `${API_URL}/api/auth/recover/confirm?token=${token}`;
     console.log(`[EmailService] Enviando recuperação para ${to}...`);
     await enqueue({
       to,

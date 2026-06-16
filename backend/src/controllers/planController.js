@@ -19,6 +19,7 @@ function sanitizePlanInput(body = {}, { partial = false } = {}) {
     out.planType = body.planType;
   }
 
+  if (body.stripePriceId !== undefined) out.stripePriceId = String(body.stripePriceId).trim();
   if (body.priceUsd !== undefined) out.priceUsd = clamp(body.priceUsd, 0, Number.MAX_SAFE_INTEGER);
   if (body.monthlyCreditUsd !== undefined) out.monthlyCreditUsd = clamp(body.monthlyCreditUsd, 0, Number.MAX_SAFE_INTEGER);
   if (body.signupBonusUsd !== undefined) out.signupBonusUsd = clamp(body.signupBonusUsd, 0, Number.MAX_SAFE_INTEGER);

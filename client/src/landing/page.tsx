@@ -1,6 +1,6 @@
 import React from 'react';
-import Link from 'next/link';
-import { Bot, ArrowRight, Code2, Zap, ShieldCheck, Sparkles, Cpu, Layers3 } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Bot, ArrowRight, Code2, Zap, ShieldCheck, Sparkles } from 'lucide-react';
 
 export default function LandingPage() {
   return (
@@ -19,9 +19,8 @@ export default function LandingPage() {
         </div>
         <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-400">
           <a href="#features" className="hover:text-white transition-colors duration-150">Features</a>
-          <a href="#pricing"  className="hover:text-white transition-colors duration-150">Planos</a>
-          <Link href="/login" className="hover:text-white transition-colors duration-150">Login</Link>
-          <Link href="/login" className="btn-gradient text-sm py-2 px-5 rounded-xl">
+          <Link to="/login" className="hover:text-white transition-colors duration-150">Login</Link>
+          <Link to="/login" className="btn-gradient text-sm py-2 px-5 rounded-xl">
             Começar Grátis
           </Link>
         </nav>
@@ -62,7 +61,7 @@ export default function LandingPage() {
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
             <Link
-              href="/login"
+              to="/login"
               className="btn-gradient text-base py-3.5 px-9 rounded-2xl font-bold"
               style={{ boxShadow: '0 8px 36px rgba(140,70,255,0.35), 0 0 0 1px rgba(140,70,255,0.2)' }}
             >
@@ -153,71 +152,16 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Pricing */}
-      <section id="pricing" className="py-24 border-t border-white/[0.05]">
-        <div className="max-w-5xl mx-auto px-6">
-          <div className="text-center mb-16">
-            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-white/10 bg-white/[0.04] text-slate-400 text-xs font-medium mb-4">
-              <Cpu className="w-3.5 h-3.5" />
-              Planos
-            </div>
-            <h2 className="font-game text-3xl md:text-4xl text-white tracking-wide">Simples e transparente</h2>
-            <p className="text-slate-400 mt-3 text-sm max-w-md mx-auto">Carregue créditos e pague apenas pelo que usar. Sem surpresas na fatura.</p>
-          </div>
-
-          <div className="grid md:grid-cols-2 gap-6 max-w-2xl mx-auto">
-            {/* Prepaid */}
-            <div className="card p-7 flex flex-col gap-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: 'rgba(71,133,255,0.12)', border: '1px solid rgba(71,133,255,0.22)', color: '#7eb3ff' }}>
-                  <Zap className="w-5 h-5" />
-                </div>
-                <div>
-                  <div className="font-semibold text-white text-base">Pré-pago</div>
-                  <div className="text-xs text-slate-500">Créditos sob demanda</div>
-                </div>
-              </div>
-              <ul className="space-y-2.5 text-sm text-slate-400 flex-1">
-                {['Carregue qualquer valor', 'Pague por geração', 'Sem vencimento dos créditos', 'Acesso a todos os modelos'].map((item) => (
-                  <li key={item} className="flex items-center gap-2">
-                    <span className="text-emerald-400 text-xs">✓</span> {item}
-                  </li>
-                ))}
-              </ul>
-              <Link href="/login" className="btn-primary w-full justify-center py-2.5 rounded-xl text-sm mt-2">
-                Começar <ArrowRight className="w-3.5 h-3.5" />
-              </Link>
-            </div>
-
-            {/* Recorrente */}
-            <div
-              className="card p-7 flex flex-col gap-4 relative overflow-hidden"
-              style={{ borderColor: 'rgba(140,70,255,0.28)', boxShadow: '0 0 40px rgba(140,70,255,0.10)' }}
-            >
-              <div className="absolute top-4 right-4 text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full" style={{ background: 'rgba(140,70,255,0.20)', color: '#c084fc', border: '1px solid rgba(140,70,255,0.30)' }}>
-                Em breve
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: 'rgba(140,70,255,0.12)', border: '1px solid rgba(140,70,255,0.25)', color: '#c084fc' }}>
-                  <Layers3 className="w-5 h-5" />
-                </div>
-                <div>
-                  <div className="font-semibold text-white text-base">Recorrente</div>
-                  <div className="text-xs text-slate-500">Franquia mensal</div>
-                </div>
-              </div>
-              <ul className="space-y-2.5 text-sm text-slate-400 flex-1">
-                {['Cota mensal garantida', 'Gerador de Ideias Virais', 'Rollover de créditos', 'Suporte prioritário'].map((item) => (
-                  <li key={item} className="flex items-center gap-2">
-                    <span className="text-violet-400 text-xs">✓</span> {item}
-                  </li>
-                ))}
-              </ul>
-              <button disabled className="btn-secondary w-full justify-center py-2.5 rounded-xl text-sm mt-2 opacity-50 cursor-not-allowed">
-                Em breve
-              </button>
-            </div>
-          </div>
+      {/* CTA */}
+      <section className="py-24 border-t border-white/[0.05]">
+        <div className="max-w-2xl mx-auto px-6 text-center">
+          <h2 className="font-game text-3xl md:text-4xl text-white tracking-wide mb-4">Comece a criar hoje</h2>
+          <p className="text-slate-400 mb-8 text-sm max-w-md mx-auto">
+            Crie sua conta com o Roblox e ganhe créditos de boas-vindas. Faça upgrade quando quiser, direto no painel.
+          </p>
+          <Link to="/login" className="btn-gradient text-base py-3.5 px-9 rounded-2xl font-bold inline-flex">
+            Criar conta grátis <ArrowRight className="w-4 h-4" />
+          </Link>
         </div>
       </section>
 

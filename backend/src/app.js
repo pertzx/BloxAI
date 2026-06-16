@@ -12,6 +12,7 @@ import { jobQueue } from './services/JobQueue.js';
 import { processAiThinkJob } from './services/AiThinkWorker.js';
 import { startEmailQueueWorker } from './services/EmailService.js';
 import { PlanService } from './services/PlanService.js';
+import { stripeWebhook } from './controllers/subscriptionController.js';
 
 // Conectar ao Banco de Dados e semear planos padrão
 connectDB().then(() => {
@@ -32,6 +33,10 @@ const httpServer = createServer(app);
 
 // Middlewares
 app.use(cors());
+
+// Webhook do Stripe precisa do corpo RAW (antes do express.json) e sem auth.
+app.post('/api/billing/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhook);
+
 app.use(express.json(
   {
     limit: '50mb',

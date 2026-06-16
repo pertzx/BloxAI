@@ -77,98 +77,139 @@ function UI:Initialize(plugin)
     self.ContentContainer.Parent = frame
 
     -- Ouvir mudanças de Auth (Auto-Login, Logout)
-    AuthManager.OnAuthChanged:Connect(function(isAuthenticated, projectName)
+    AuthManager.OnAuthChanged:Connect(function(isAuthenticated, projectName, errMsg)
         if isAuthenticated then
             self:RenderDashboardScreen(projectName)
         else
-            self:RenderAuthScreen()
+            self:RenderAuthScreen(errMsg)
         end
     end)
 
     if AuthManager:IsAuthenticated() then
-        -- Se já tiver a key, mostramos dashboard pendente de nome real (ou podemos puxar da api dps)
-        self:RenderDashboardScreen("Seu Projeto")
+        self:RenderDashboardScreen("Conectando...")
     else
         self:RenderAuthScreen()
     end
 end
 
-function UI:RenderAuthScreen()
+function UI:RenderAuthScreen(errMsg)
     self.ContentContainer:ClearAllChildren()
 
-    local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(1, -40, 0, 40)
-    label.Position = UDim2.new(0, 20, 0, 10)
-    label.BackgroundTransparency = 1
-    label.Text = "Entre na sua conta Blox AI"
-    label.TextColor3 = Color3.fromRGB(148, 163, 184) 
-    label.Font = Enum.Font.Gotham
-    label.TextSize = 14
-    label.TextWrapped = true
-    label.Parent = self.ContentContainer
+    -- Padding container com layout vertical
+    local pad = Instance.new("Frame")
+    pad.Size = UDim2.new(1, -32, 1, -16)
+    pad.Position = UDim2.new(0, 16, 0, 8)
+    pad.BackgroundTransparency = 1
+    pad.Parent = self.ContentContainer
 
-    local emailInput = Instance.new("TextBox")
-    emailInput.Size = UDim2.new(1, -40, 0, 40)
-    emailInput.Position = UDim2.new(0, 20, 0, 60)
-    emailInput.BackgroundColor3 = Color3.fromRGB(30, 41, 59) 
-    emailInput.TextColor3 = Color3.fromRGB(248, 250, 252)
-    emailInput.PlaceholderText = "E-mail"
-    emailInput.Font = Enum.Font.Gotham
-    emailInput.TextSize = 14
-    emailInput.ClearTextOnFocus = false
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 10)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = pad
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 24)
+    title.BackgroundTransparency = 1
+    title.Text = "Conectar projeto"
+    title.TextColor3 = Color3.fromRGB(248, 250, 252)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 16
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.LayoutOrder = 1
+    title.Parent = pad
+
+    -- Card com info do jogo detectado automaticamente
+    local placeId, placeName = AuthManager:GetGameInfo()
+    local gameCard = Instance.new("Frame")
+    gameCard.Size = UDim2.new(1, 0, 0, 54)
+    gameCard.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+    gameCard.LayoutOrder = 2
+    local gcCorner = Instance.new("UICorner")
+    gcCorner.CornerRadius = UDim.new(0, 8)
+    gcCorner.Parent = gameCard
+    gameCard.Parent = pad
+
+    local gameLabel = Instance.new("TextLabel")
+    gameLabel.Size = UDim2.new(1, -20, 1, -12)
+    gameLabel.Position = UDim2.new(0, 10, 0, 6)
+    gameLabel.BackgroundTransparency = 1
+    gameLabel.Text = "🎮 " .. placeName .. "\nPlace ID: " .. placeId
+    gameLabel.TextColor3 = Color3.fromRGB(148, 163, 184)
+    gameLabel.Font = Enum.Font.Gotham
+    gameLabel.TextSize = 12
+    gameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    gameLabel.TextYAlignment = Enum.TextYAlignment.Top
+    gameLabel.TextWrapped = true
+    gameLabel.Parent = gameCard
+
+    local hint = Instance.new("TextLabel")
+    hint.Size = UDim2.new(1, 0, 0, 16)
+    hint.BackgroundTransparency = 1
+    hint.Text = "Cole a API Key do projeto (dashboard web)"
+    hint.TextColor3 = Color3.fromRGB(100, 116, 139)
+    hint.Font = Enum.Font.Gotham
+    hint.TextSize = 12
+    hint.TextXAlignment = Enum.TextXAlignment.Left
+    hint.LayoutOrder = 3
+    hint.Parent = pad
+
+    local apiKeyInput = Instance.new("TextBox")
+    apiKeyInput.Size = UDim2.new(1, 0, 0, 40)
+    apiKeyInput.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+    apiKeyInput.TextColor3 = Color3.fromRGB(248, 250, 252)
+    apiKeyInput.PlaceholderText = "blox_xxxxxxxxxxxx"
+    apiKeyInput.PlaceholderColor3 = Color3.fromRGB(100, 116, 139)
+    apiKeyInput.Font = Enum.Font.Code
+    apiKeyInput.TextSize = 13
+    apiKeyInput.ClearTextOnFocus = false
+    apiKeyInput.TextXAlignment = Enum.TextXAlignment.Left
+    apiKeyInput.LayoutOrder = 4
+    local padding = Instance.new("UIPadding")
+    padding.PaddingLeft = UDim.new(0, 10)
+    padding.PaddingRight = UDim.new(0, 10)
+    padding.Parent = apiKeyInput
     local corner1 = Instance.new("UICorner")
-    corner1.CornerRadius = UDim.new(0, 6)
-    corner1.Parent = emailInput
-    emailInput.Parent = self.ContentContainer
-
-    local passInput = Instance.new("TextBox")
-    passInput.Size = UDim2.new(1, -40, 0, 40)
-    passInput.Position = UDim2.new(0, 20, 0, 110)
-    passInput.BackgroundColor3 = Color3.fromRGB(30, 41, 59) 
-    passInput.TextColor3 = Color3.fromRGB(248, 250, 252)
-    passInput.PlaceholderText = "Senha"
-    passInput.Font = Enum.Font.Gotham
-    passInput.TextSize = 14
-    passInput.ClearTextOnFocus = false
-    -- O Roblox nativo n tem field "type=password", pra mvp deixamos normal ou censurado via script, 
-    -- mas por simplicidade e limite de API deixamos normal.
-    local corner2 = Instance.new("UICorner")
-    corner2.CornerRadius = UDim.new(0, 6)
-    corner2.Parent = passInput
-    passInput.Parent = self.ContentContainer
+    corner1.CornerRadius = UDim.new(0, 8)
+    corner1.Parent = apiKeyInput
+    apiKeyInput.Parent = pad
 
     local errorLabel = Instance.new("TextLabel")
-    errorLabel.Size = UDim2.new(1, -40, 0, 20)
-    errorLabel.Position = UDim2.new(0, 20, 0, 155)
+    errorLabel.Size = UDim2.new(1, 0, 0, 16)
     errorLabel.BackgroundTransparency = 1
-    errorLabel.Text = ""
-    errorLabel.TextColor3 = Color3.fromRGB(248, 113, 113) 
+    errorLabel.Text = errMsg or ""
+    errorLabel.TextColor3 = Color3.fromRGB(248, 113, 113)
     errorLabel.Font = Enum.Font.Gotham
     errorLabel.TextSize = 12
-    errorLabel.Parent = self.ContentContainer
+    errorLabel.TextXAlignment = Enum.TextXAlignment.Left
+    errorLabel.TextWrapped = true
+    errorLabel.LayoutOrder = 5
+    errorLabel.Parent = pad
 
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -40, 0, 40)
-    btn.Position = UDim2.new(0, 20, 0, 180)
-    btn.BackgroundColor3 = Color3.fromRGB(37, 99, 235) 
+    btn.Size = UDim2.new(1, 0, 0, 40)
+    btn.BackgroundColor3 = Color3.fromRGB(124, 58, 237) -- violet-600
     btn.TextColor3 = Color3.new(1, 1, 1)
-    btn.Text = "Login"
+    btn.Text = "Conectar"
     btn.Font = Enum.Font.GothamBold
     btn.TextSize = 14
+    btn.AutoButtonColor = true
+    btn.LayoutOrder = 6
     local btnCorner = Instance.new("UICorner")
-    btnCorner.CornerRadius = UDim.new(0, 6)
+    btnCorner.CornerRadius = UDim.new(0, 8)
     btnCorner.Parent = btn
-    btn.Parent = self.ContentContainer
+    btn.Parent = pad
 
     btn.MouseButton1Click:Connect(function()
-        if emailInput.Text ~= "" and passInput.Text ~= "" then
+        if apiKeyInput.Text ~= "" then
             btn.Text = "Conectando..."
             errorLabel.Text = ""
-            local success, msg = AuthManager:Login(emailInput.Text, passInput.Text)
+            local success, msg = AuthManager:Login(apiKeyInput.Text)
             if not success then
-                btn.Text = "Login"
+                btn.Text = "Conectar"
                 errorLabel.Text = msg
             end
+        else
+            errorLabel.Text = "Cole a API Key do projeto."
         end
     end)
 end
@@ -176,15 +217,18 @@ end
 function UI:RenderDashboardScreen(projectName)
     self.ContentContainer:ClearAllChildren()
 
+    local _, gameName = AuthManager:GetGameInfo()
+
     local status = Instance.new("TextLabel")
-    status.Size = UDim2.new(1, -40, 0, 80)
+    status.Size = UDim2.new(1, -40, 0, 90)
     status.Position = UDim2.new(0, 20, 0, 20)
     status.BackgroundTransparency = 1
-    status.Text = "🟢 Conectado!\nProjeto: " .. (projectName or "Auto") .. "\n\nAguardando comandos da Web..."
-    status.TextColor3 = Color3.fromRGB(74, 222, 128) 
+    status.Text = "🟢 Conectado!\nProjeto: " .. (projectName or "Auto") .. "\nJogo: " .. (gameName or "—") .. "\n\nAguardando comandos da Web..."
+    status.TextColor3 = Color3.fromRGB(74, 222, 128)
     status.Font = Enum.Font.GothamBold
     status.TextSize = 14
     status.TextWrapped = true
+    status.TextYAlignment = Enum.TextYAlignment.Top
     status.Parent = self.ContentContainer
 
     local logoutBtn = Instance.new("TextButton")

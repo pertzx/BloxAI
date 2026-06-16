@@ -1,6 +1,6 @@
 "use client";
 import React, { useEffect, useMemo, useState } from 'react';
-import { Bot, Folder, Plus, Search, User, Activity, Cpu, Radio, Clock3, X, ArrowRight, ShieldCheck, Sparkles, Lock, Settings } from 'lucide-react';
+import { Bot, Folder, Plus, Search, User, Activity, Cpu, Radio, Clock3, X, ArrowRight, ShieldCheck, Sparkles, Lock, Settings, Trophy, Crown, Zap, Wallet } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import api from '../api/api.js';
 
@@ -8,10 +8,37 @@ function decodeJwtRole(token: string): string | null {
   try { return JSON.parse(atob(token.split('.')[1]))?.role ?? null; }
   catch { return null; }
 }
-function decodeJwtPlanType(token: string): string | null {
-  try { return JSON.parse(atob(token.split('.')[1]))?.planType ?? null; }
-  catch { return null; }
-}
+
+type Me = {
+  robloxUsername: string;
+  robloxDisplayName: string;
+  robloxAvatarUrl: string;
+  role: string;
+  planKey: string | null;
+  planType: string;
+  plan: string;
+  balanceUsd: number;
+  features?: { ideaGenerator?: boolean };
+};
+
+type RankRow = {
+  rank: number;
+  robloxUsername: string;
+  robloxDisplayName: string;
+  robloxAvatarUrl: string;
+  totalTokens: number;
+  commands: number;
+  isMe: boolean;
+};
+
+type Billing = {
+  balanceUsd: number;
+  walletStartUsd: number;
+  consumptionPercent: number;
+  planType?: string;
+  plan?: string;
+  lifetime?: { totalChargedUsd: number; totalRealCostUsd: number };
+};
 
 export default function Dashboard() {
   const [projects, setProjects] = useState<any[]>([]);
@@ -22,10 +49,16 @@ export default function Dashboard() {
   const [newProjectPlaceId, setNewProjectPlaceId] = useState('');
   const [createError, setCreateError] = useState('');
   const [creating, setCreating] = useState(false);
+  const [me, setMe] = useState<Me | null>(null);
+  const [ranking, setRanking] = useState<RankRow[]>([]);
+  const [billing, setBilling] = useState<Billing | null>(null);
+  const [showUpgrade, setShowUpgrade] = useState(false);
   const router = useNavigate();
   const _token = localStorage.getItem('blox_token') ?? '';
   const isAdmin = decodeJwtRole(_token) === 'admin';
-  const hasIdeasAccess = decodeJwtPlanType(_token) === 'recurring' || isAdmin;
+  const hasIdeasAccess = Boolean(me?.features?.ideaGenerator) || isAdmin;
+  // Plano grátis com saldo esgotado → toast de upgrade
+  const freeExhausted = !!me && me.planType !== 'recurring' && (me.balanceUsd ?? 0) <= 0 && me.role !== 'admin';
 
   const filteredProjects = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -62,6 +95,23 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, [router]);
 
+  useEffect(() => {
+    const token = localStorage.getItem('blox_token');
+    if (!token) return;
+    const headers = { Authorization: `Bearer ${token}` };
+    api.get('/api/auth/me', { headers }).then((r) => setMe(r.data)).catch(() => {});
+    api.get('/api/billing/ranking', { headers }).then((r) => setRanking(r.data?.ranking ?? [])).catch(() => {});
+    const loadBilling = () => api.get('/api/billing/me', { headers }).then((r) => setBilling(r.data)).catch(() => {});
+    loadBilling();
+    const t = setInterval(loadBilling, 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Mostra o toast de upgrade uma vez por sessão de dashboard quando o plano grátis esgota.
+  useEffect(() => {
+    if (freeExhausted) setShowUpgrade(true);
+  }, [freeExhausted]);
+
   const handleCreateProject = async () => {
     const token = localStorage.getItem('blox_token');
     const name = newProjectName.trim();
@@ -97,6 +147,36 @@ export default function Dashboard() {
 
   return (
     <div className="aurora-bg min-h-screen flex flex-col text-slate-100">
+      {/* Upgrade toast — plano grátis esgotado */}
+      {showUpgrade && (
+        <div className="fixed bottom-6 right-6 z-50 max-w-sm animate-slide-up">
+          <div className="glass-strong rounded-2xl p-5 border" style={{ borderColor: 'rgba(140,70,255,0.30)', boxShadow: '0 12px 40px rgba(140,70,255,0.20)' }}>
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0" style={{ background: 'rgba(140,70,255,0.15)', border: '1px solid rgba(140,70,255,0.30)' }}>
+                <Crown className="w-4 h-4 text-violet-300" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-semibold text-white">Seus créditos acabaram</div>
+                <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  Faça upgrade para um plano recorrente e continue gerando com cota mensal garantida.
+                </p>
+                <div className="flex items-center gap-2 mt-3">
+                  <Link to="/upgrade" className="btn-gradient py-1.5 px-4 rounded-lg text-xs">
+                    Ver planos <ArrowRight className="w-3 h-3" />
+                  </Link>
+                  <button onClick={() => setShowUpgrade(false)} className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1.5">
+                    Agora não
+                  </button>
+                </div>
+              </div>
+              <button onClick={() => setShowUpgrade(false)} className="text-slate-500 hover:text-white shrink-0">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="sticky top-0 z-40 flex items-center justify-between px-6 py-4 glass border-b border-white/[0.06]">
         <div className="flex items-center gap-2.5">
@@ -136,6 +216,16 @@ export default function Dashboard() {
               Ideias Virais
             </Link>
           )}
+          {me && me.planType !== 'recurring' && me.role !== 'admin' && (
+            <Link
+              to="/upgrade"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border transition-all hover:brightness-110"
+              style={{ background: 'linear-gradient(135deg,rgba(71,133,255,0.18),rgba(140,70,255,0.18))', borderColor: 'rgba(140,70,255,0.30)', color: '#c4b5fd' }}
+            >
+              <Crown className="w-3.5 h-3.5" />
+              Fazer upgrade
+            </Link>
+          )}
           <button
             onClick={() => setIsCreateOpen(true)}
             className="btn-primary text-sm py-2 px-4 rounded-xl"
@@ -145,27 +235,33 @@ export default function Dashboard() {
           </button>
           <Link
             to="/settings"
-            className="w-9 h-9 rounded-xl flex items-center justify-center border border-white/[0.08] bg-white/[0.04] hover:bg-white/[0.08] transition-colors"
-            title="Configurações"
+            className="w-9 h-9 rounded-xl flex items-center justify-center border border-white/[0.08] bg-white/[0.04] hover:bg-white/[0.08] transition-colors overflow-hidden"
+            title={me?.robloxDisplayName ? `${me.robloxDisplayName} · Configurações` : 'Configurações'}
           >
-            <Settings className="w-4 h-4 text-slate-400" />
+            {me?.robloxAvatarUrl
+              ? <img src={me.robloxAvatarUrl} alt="" className="w-full h-full object-cover" />
+              : <User className="w-4 h-4 text-slate-400" />
+            }
           </Link>
           <button
             className="w-9 h-9 rounded-xl flex items-center justify-center border border-white/[0.08] bg-white/[0.04] hover:bg-white/[0.08] transition-colors"
             onClick={() => { localStorage.removeItem('blox_token'); router('/'); }}
             title="Sair"
           >
-            <User className="w-4 h-4 text-slate-400" />
+            <X className="w-4 h-4 text-slate-400" />
           </button>
         </div>
       </header>
 
       <main className="flex-1 max-w-7xl mx-auto w-full px-6 py-10">
         {/* Page Title */}
-        <div className="mb-10">
+        <div className="mb-8">
           <h2 className="text-3xl font-bold text-white tracking-tight">Dashboard</h2>
           <p className="text-slate-400 mt-1 text-sm">Gerencie e monitore seus projetos Roblox.</p>
         </div>
+
+        {/* Usage bar */}
+        {billing && <UsageBar billing={billing} onUpgrade={() => router('/upgrade')} />}
 
         {/* Stats */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-10">
@@ -174,7 +270,7 @@ export default function Dashboard() {
           <StatCard icon={<Cpu className="h-4 w-4" />} label="Nodes" value={String(totalNodes)} />
           <StatCard icon={<Bot className="h-4 w-4" />} label="Mensagens" value={String(totalMessages)} />
           <StatCard icon={<Activity className="h-4 w-4" />} label="Tokens" value={formatCompactNumber(totalTokens)} />
-          <StatCard icon={<Activity className="h-4 w-4" />} label="Custo" value={`$${totalCost.toFixed(2)}`} />
+          <StatCard icon={<Activity className="h-4 w-4" />} label="Gasto total" value={`$${(billing?.lifetime?.totalChargedUsd ?? totalCost).toFixed(2)}`} />
         </div>
 
         {/* Search + Recents */}
@@ -225,6 +321,49 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+
+        {/* Ranking */}
+        {ranking.length > 0 && (
+          <div className="mb-10">
+            <div className="flex items-center gap-2 mb-5">
+              <Trophy className="w-5 h-5 text-amber-400" />
+              <h3 className="text-lg font-semibold text-white">Ranking de atividade</h3>
+              <span className="text-xs text-slate-500">— quem mais constrói com a IA</span>
+            </div>
+            <div className="card divide-y divide-white/[0.05]">
+              {ranking.map((r) => (
+                <div
+                  key={r.rank}
+                  className="flex items-center gap-3 px-4 py-3"
+                  style={r.isMe ? { background: 'rgba(71,133,255,0.06)' } : undefined}
+                >
+                  <div className="w-7 text-center shrink-0">
+                    {r.rank <= 3
+                      ? <Crown className="w-4 h-4 mx-auto" style={{ color: r.rank === 1 ? '#fbbf24' : r.rank === 2 ? '#cbd5e1' : '#d97706' }} />
+                      : <span className="text-sm font-bold text-slate-500">{r.rank}</span>
+                    }
+                  </div>
+                  <div className="w-8 h-8 rounded-full overflow-hidden shrink-0 border border-white/[0.08] bg-white/[0.04] flex items-center justify-center">
+                    {r.robloxAvatarUrl
+                      ? <img src={r.robloxAvatarUrl} alt="" className="w-full h-full object-cover" />
+                      : <User className="w-4 h-4 text-slate-500" />
+                    }
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium text-white truncate">
+                      @{r.robloxUsername || '—'} {r.isMe && <span className="text-[10px] text-blue-400">(você)</span>}
+                    </div>
+                    <div className="text-[11px] text-slate-500 truncate">{r.robloxDisplayName}</div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div className="text-sm font-mono text-slate-200">{formatCompactNumber(r.totalTokens)}</div>
+                    <div className="text-[10px] text-slate-600 uppercase tracking-wide">tokens · {r.commands} cmds</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Projects Grid */}
         <div>
@@ -343,6 +482,83 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function UsageBar({ billing, onUpgrade }: { billing: Billing; onUpgrade: () => void }) {
+  const start = Number(billing.walletStartUsd || 0);
+  const balance = Math.max(0, Number(billing.balanceUsd || 0));
+  const used = Math.max(0, start - balance);
+  const pct = start > 0 ? Math.min(100, Math.max(0, (used / start) * 100)) : (balance > 0 ? 0 : 100);
+  const lifetime = Number(billing.lifetime?.totalChargedUsd || 0);
+  const isRecurring = billing.planType === 'recurring';
+
+  // Cor da barra conforme o consumo (verde→âmbar→vermelho)
+  const fill = pct >= 90
+    ? 'linear-gradient(90deg, #f59e0b, #ef4444)'
+    : pct >= 70
+      ? 'linear-gradient(90deg, #4785FF, #f59e0b)'
+      : 'linear-gradient(90deg, #4785FF, #8C46FF)';
+  const glow = pct >= 90 ? 'rgba(239,68,68,0.5)' : pct >= 70 ? 'rgba(245,158,11,0.45)' : 'rgba(140,70,255,0.45)';
+  const low = start > 0 && balance <= start * 0.1; // ≤10% restante
+
+  return (
+    <div
+      className="mb-10 relative overflow-hidden rounded-2xl p-5 sm:p-6"
+      style={{
+        background: 'linear-gradient(135deg, rgba(30,41,59,0.55), rgba(15,23,42,0.35))',
+        backdropFilter: 'blur(18px)',
+        WebkitBackdropFilter: 'blur(18px)',
+        border: '1px solid rgba(255,255,255,0.10)',
+        boxShadow: '0 8px 32px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.08)',
+      }}
+    >
+      <div className="pointer-events-none absolute -top-16 -right-10 w-64 h-40 rounded-full opacity-25" style={{ background: `radial-gradient(ellipse, ${glow}, transparent 70%)`, filter: 'blur(40px)' }} />
+
+      <div className="flex items-center justify-between gap-4 mb-4 relative">
+        <div className="flex items-center gap-2.5">
+          <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: 'rgba(140,70,255,0.15)', border: '1px solid rgba(140,70,255,0.28)' }}>
+            <Wallet className="w-4 h-4 text-violet-300" />
+          </div>
+          <div>
+            <div className="text-sm font-semibold text-white">Uso da carteira</div>
+            <div className="text-[11px] text-slate-400">{isRecurring ? 'Cota do ciclo atual' : 'Créditos pré-pagos'}</div>
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="text-2xl font-bold text-white leading-none">{pct.toFixed(0)}<span className="text-base text-slate-400">%</span></div>
+          <div className="text-[11px] text-slate-500 mt-0.5">usado</div>
+        </div>
+      </div>
+
+      <div className="relative h-3.5 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.06)' }}>
+        <div
+          className="h-full rounded-full transition-all duration-700 ease-out relative"
+          style={{ width: `${pct}%`, background: fill, boxShadow: `0 0 16px ${glow}` }}
+        >
+          <div className="absolute inset-0 rounded-full" style={{ background: 'linear-gradient(180deg, rgba(255,255,255,0.35), transparent 60%)' }} />
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between mt-3 text-xs relative">
+        <span className="text-slate-300">
+          <span className="font-mono text-white">${used.toFixed(2)}</span>
+          <span className="text-slate-500"> de ${start.toFixed(2)}</span>
+        </span>
+        <span className="text-slate-300">
+          Restante <span className="font-mono text-emerald-300">${balance.toFixed(2)}</span>
+        </span>
+      </div>
+
+      <div className="flex items-center justify-between mt-2 relative">
+        <span className="text-[11px] text-slate-500">Total gasto: <span className="font-mono text-slate-400">${lifetime.toFixed(2)}</span></span>
+        {low && (
+          <button onClick={onUpgrade} className="text-[11px] font-semibold text-violet-300 hover:text-violet-200 flex items-center gap-1">
+            <Crown className="w-3 h-3" /> Recarregar / upgrade
+          </button>
+        )}
+      </div>
     </div>
   );
 }

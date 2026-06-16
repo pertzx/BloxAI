@@ -1,13 +1,14 @@
 local AuthManager = {}
 local ServerStorage = game:GetService("ServerStorage")
 local HttpService = game:GetService("HttpService")
+local MarketplaceService = game:GetService("MarketplaceService")
 local Logger = require(script.Parent.Parent.Utils.Logger)
 local Config = require(script.Parent.Parent.Config)
 local HttpClient = require(script.Parent.Parent.Core.HttpClient)
 
 local STORAGE_FOLDER_NAME = "BloxAI_Internal_Data"
-local CREDS_KEY = "UserCredentials"
 local API_KEY_KEY = "ProjectApiKey"
+local PROJECT_ID_KEY = "CurrentProjectId"
 
 -- Eventos customizados para atualizar a UI
 local BindableEvent = Instance.new("BindableEvent")
@@ -16,10 +17,10 @@ AuthManager.OnAuthChanged = BindableEvent.Event
 function AuthManager:Initialize(pluginInstance)
     self.Plugin = pluginInstance
     Logger.Info("AuthManager Inicializado.")
-    
+
     self:EnsureStorageExists()
-    
-    -- Tenta auto-login ao iniciar o plugin
+
+    -- Tenta auto-login ao iniciar o plugin (usando a apiKey salva)
     task.spawn(function()
         self:TryAutoLogin()
     end)
@@ -31,46 +32,32 @@ function AuthManager:EnsureStorageExists()
         folder = Instance.new("Folder")
         folder.Name = STORAGE_FOLDER_NAME
         folder.Parent = ServerStorage
-        folder.Archivable = false 
+        folder.Archivable = false
     end
+    return folder
 end
 
-function AuthManager:SaveCredentials(email, password)
-    self:EnsureStorageExists()
-    local folder = ServerStorage[STORAGE_FOLDER_NAME]
-    
-    local credsValue = folder:FindFirstChild(CREDS_KEY)
-    if not credsValue then
-        credsValue = Instance.new("StringValue")
-        credsValue.Name = CREDS_KEY
-        credsValue.Parent = folder
-    end
-    
-    -- Para mvp salvamos plain/base64 simples, em produção usaríamos AES
-    local data = { e = email, p = password }
-    credsValue.Value = HttpService:JSONEncode(data)
-end
+-- Detecta o placeId atual e o nome REAL do jogo (se publicado).
+function AuthManager:GetGameInfo()
+    local placeId = game.PlaceId
+    local placeName = game.Name
 
-function AuthManager:GetCredentials()
-    local folder = ServerStorage:FindFirstChild(STORAGE_FOLDER_NAME)
-    if folder then
-        local credsValue = folder:FindFirstChild(CREDS_KEY)
-        if credsValue and credsValue.Value ~= "" then
-            local success, data = pcall(function()
-                return HttpService:JSONDecode(credsValue.Value)
-            end)
-            if success then return data.e, data.p end
+    if placeId and placeId ~= 0 then
+        -- Tenta pegar o nome real do jogo publicado
+        local ok, info = pcall(function()
+            return MarketplaceService:GetProductInfo(placeId)
+        end)
+        if ok and info and info.Name then
+            placeName = info.Name
         end
     end
-    return nil, nil
+
+    return tostring(placeId), placeName
 end
 
-local PROJECT_ID_KEY = "CurrentProjectId"
-
 function AuthManager:SaveApiKey(apiKey, projectId)
-    self:EnsureStorageExists()
-    local folder = ServerStorage[STORAGE_FOLDER_NAME]
-    
+    local folder = self:EnsureStorageExists()
+
     local keyVal = folder:FindFirstChild(API_KEY_KEY)
     if not keyVal then
         keyVal = Instance.new("StringValue")
@@ -91,6 +78,17 @@ function AuthManager:SaveApiKey(apiKey, projectId)
     end
 end
 
+function AuthManager:GetApiKey()
+    local folder = ServerStorage:FindFirstChild(STORAGE_FOLDER_NAME)
+    if folder then
+        local keyVal = folder:FindFirstChild(API_KEY_KEY)
+        if keyVal and keyVal.Value ~= "" then
+            return keyVal.Value
+        end
+    end
+    return nil
+end
+
 function AuthManager:GetProjectId()
     local folder = ServerStorage:FindFirstChild(STORAGE_FOLDER_NAME)
     if folder then
@@ -102,58 +100,58 @@ function AuthManager:GetProjectId()
     return nil
 end
 
-function AuthManager:Login(email, password)
-    local placeId = game.PlaceId
-    if placeId == 0 then placeId = 123456789 end -- Fallback se for baseplate novo sem publicar
-    
+-- Login via apiKey do projeto (copiada do dashboard web).
+-- placeId e nome do jogo são detectados automaticamente.
+function AuthManager:Login(apiKey)
+    apiKey = apiKey and tostring(apiKey):gsub("%s+", "") or ""
+    if apiKey == "" then
+        return false, "Cole a API Key do projeto."
+    end
+
+    local placeId, placeName = self:GetGameInfo()
+    if placeId == "0" then
+        return false, "Publique o jogo primeiro (Place ID inválido)."
+    end
+
     local url = Config.ApiUrl .. "/plugin/auth"
     local payload = HttpService:JSONEncode({
-        email = email,
-        password = password,
-        placeId = tostring(placeId),
-        placeName = game.Name
+        apiKey = apiKey,
+        placeId = placeId,
+        placeName = placeName,
     })
-    -- #region debug-point plugin-auth-login-payload
-    Logger.Debug("Plugin login tentativa | email=" .. tostring(email) .. " | placeId=" .. tostring(placeId) .. " | placeName=" .. tostring(game.Name))
-    Logger.Debug("Plugin login payload size=" .. tostring(string.len(payload)) .. " | snippet=" .. string.sub(payload, 1, 250))
-    -- #endregion
-    
+
+    Logger.Debug("Plugin login | placeId=" .. placeId .. " | placeName=" .. placeName)
+
     local success, response = pcall(function()
         return HttpService:PostAsync(url, payload, Enum.HttpContentType.ApplicationJson, false)
     end)
-    
+
     if success then
-        -- #region debug-point plugin-auth-login-success-http
-        Logger.Debug("Plugin login HTTP success | raw response=" .. string.sub(tostring(response), 1, 300))
-        -- #endregion
-        local data = HttpService:JSONDecode(response)
-        if data.token and data.project then
-            self:SaveCredentials(email, password)
-            self:SaveApiKey(data.token, data.project.id) -- Salva o token JWT e o ID do projeto
-            
+        local ok, data = pcall(function() return HttpService:JSONDecode(response) end)
+        if ok and data and data.token and data.project then
+            self:SaveApiKey(apiKey, data.project.id)
             Logger.Info("Login efetuado! Projeto conectado: " .. data.project.name)
             BindableEvent:Fire(true, data.project.name)
             return true, "Conectado a " .. data.project.name
         else
-            return false, data.error or "Erro desconhecido"
+            local err = (ok and data and data.error) or "Resposta inválida do servidor."
+            return false, err
         end
     else
         Logger.Error("Erro ao logar: " .. tostring(response))
-        -- #region debug-point plugin-auth-login-failure-http
-        Logger.Debug("Plugin login HTTP failure | detail=" .. tostring(response))
-        -- #endregion
         return false, "Erro de conexão com o servidor."
     end
 end
 
 function AuthManager:TryAutoLogin()
-    local email, password = self:GetCredentials()
-    if email and password then
-        Logger.Info("Tentando auto-login...")
-        local success, msg = self:Login(email, password)
+    local apiKey = self:GetApiKey()
+    if apiKey then
+        Logger.Info("Tentando auto-login com a API Key salva...")
+        HttpClient:SetApiKey(apiKey)
+        local success, msg = self:Login(apiKey)
         if not success then
             Logger.Warn("Auto-login falhou: " .. tostring(msg))
-            BindableEvent:Fire(false)
+            BindableEvent:Fire(false, nil, msg)
         end
     else
         BindableEvent:Fire(false)
@@ -171,11 +169,7 @@ function AuthManager:Logout()
 end
 
 function AuthManager:IsAuthenticated()
-    local folder = ServerStorage:FindFirstChild(STORAGE_FOLDER_NAME)
-    if folder and folder:FindFirstChild(API_KEY_KEY) then
-        return true
-    end
-    return false
+    return self:GetApiKey() ~= nil
 end
 
 return AuthManager

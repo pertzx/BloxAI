@@ -157,6 +157,45 @@ export const adminListUsers = async (req, res) => {
   }
 };
 
+// ---- Ranking de atividade (visível a qualquer usuário autenticado) ----
+
+export const getRanking = async (req, res) => {
+  try {
+    const top = await CostLog.aggregate([
+      { $group: { _id: '$user', totalTokens: { $sum: '$totalTokens' }, commands: { $sum: 1 } } },
+      { $sort: { totalTokens: -1, commands: -1 } },
+      { $limit: 10 },
+    ]);
+
+    const ids = top.map((t) => t._id).filter(Boolean);
+    const users = await User.find({ _id: { $in: ids } })
+      .select('robloxUsername robloxDisplayName robloxAvatarUrl')
+      .lean();
+    const byId = new Map(users.map((u) => [String(u._id), u]));
+
+    const ranking = top
+      .map((t, i) => {
+        const u = byId.get(String(t._id));
+        if (!u) return null;
+        return {
+          rank: i + 1,
+          robloxUsername: u.robloxUsername || '',
+          robloxDisplayName: u.robloxDisplayName || '',
+          robloxAvatarUrl: u.robloxAvatarUrl || '',
+          totalTokens: Number(t.totalTokens || 0),
+          commands: Number(t.commands || 0),
+          isMe: String(t._id) === String(req.user.id),
+        };
+      })
+      .filter(Boolean);
+
+    res.json({ ranking });
+  } catch (error) {
+    console.error('[billing] getRanking:', error);
+    res.status(500).json({ error: 'Falha ao carregar ranking.' });
+  }
+};
+
 function serializeLog(log) {
   return {
     id: log._id,

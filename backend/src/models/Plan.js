@@ -25,6 +25,9 @@ const planSchema = new mongoose.Schema({
   // Crédito (USD cobrado) concedido por ciclo ao atribuir o plano (recurring).
   monthlyCreditUsd: { type: Number, default: 0, min: 0 },
 
+  // ID do Price recorrente no Stripe (price_...). Necessário para checkout de planos pagos.
+  stripePriceId: { type: String, default: '' },
+
   // Bônus de saldo concedido ao novo usuário que cai neste plano por padrão.
   signupBonusUsd: { type: Number, default: 0, min: 0 },
 

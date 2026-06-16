@@ -13,6 +13,9 @@ export const ROBLOX_OAUTH_CLIENT_SECRET = process.env.ROBLOX_OAUTH_CLIENT_SECRET
 export const ROBLOX_REDIRECT_URI = process.env.ROBLOX_REDIRECT_URI || 'http://localhost:5000/api/auth/roblox/callback';
 // URL do frontend para onde o backend redireciona após autenticar
 export const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+// URL pública do próprio backend (usada nos links de e-mail). Deve usar o mesmo
+// host que o usuário consegue acessar (ex.: o IP de LAN se testar de outro device).
+export const API_URL = process.env.API_URL || 'http://localhost:5000';
 // IDs Roblox que recebem role admin automaticamente (separados por vírgula)
 export const ADMIN_ROBLOX_IDS = String(process.env.ADMIN_ROBLOX_IDS || '')
   .split(',').map((id) => id.trim()).filter(Boolean);
@@ -24,6 +27,11 @@ export const SMTP_PASS = process.env.SMTP_PASS || '';
 export const EMAIL_FROM = process.env.EMAIL_FROM || 'noreply@bloxai.app';
 export const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/bloxai';
 export const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+
+// Stripe (upgrades de plano recorrente)
+export const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
+export const STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_PUBLISHABLE_KEY || '';
+export const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 
 // AI Keys
 export const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';

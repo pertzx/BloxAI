@@ -4,6 +4,7 @@ import LoginPage from './login/page';
 import DashboardPage from './dashboard/page';
 import AdminPage from './admin/page';
 import IdeasPage from './ideas/page';
+import UpgradePage from './upgrade/page';
 import SettingsPage from './settings/page';
 import AuthCallbackPage from './auth/callback/page';
 import VerifyEmailPage from './auth/verify-email/page';
@@ -30,6 +31,7 @@ export default function App() {
       <Route path="/settings" element={<SettingsPage />} />
       <Route path="/admin" element={<AdminPage />} />
       <Route path="/ideas" element={<IdeasPage />} />
+      <Route path="/upgrade" element={<UpgradePage />} />
       <Route path="/project/:id" element={<ProjectRoute />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

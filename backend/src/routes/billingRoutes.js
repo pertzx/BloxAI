@@ -3,6 +3,7 @@ import { authMiddleware } from '../middlewares/auth.js';
 import { requireAdmin } from '../middlewares/requireAdmin.js';
 import {
   getMyBilling,
+  getRanking,
   adminTopUp,
   adminSetMargin,
   adminSetStatus,
@@ -15,6 +16,10 @@ import {
   deletePlan,
   assignPlan,
 } from '../controllers/planController.js';
+import {
+  listPublicPlans,
+  createCheckoutSession,
+} from '../controllers/subscriptionController.js';
 
 const router = Router();
 
@@ -22,6 +27,9 @@ router.use(authMiddleware);
 
 // Usuário autenticado
 router.get('/me', getMyBilling);
+router.get('/ranking', getRanking);
+router.get('/plans', listPublicPlans);
+router.post('/checkout', createCheckoutSession);
 
 // Administração — usuários
 router.get('/admin/users', requireAdmin, adminListUsers);
