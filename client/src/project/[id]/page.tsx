@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { 
+import {
   Folder, MessageSquare,
   ChevronDown, Send, FileCode, ArrowLeft, Box, ImageIcon, Music4, AppWindow, Blocks, Sparkles, Waypoints, Shield, Component, Layers3, PanelRightOpen, CheckSquare2, Square, Paperclip, X, Plus, Clock3, Bot, History, Cpu, Search, Pin, PinOff, Pencil, Trash2, Copy, Check
 } from 'lucide-react';
 import api from '../../api/api.js';
-import Link from 'next/link';
+import { Link } from 'react-router-dom';
 
 type WorkspaceNode = {
   nome: string;
@@ -62,6 +62,7 @@ type DisplayChatMessage = {
   model?: string;
   mode?: 'instant' | 'think';
   progressSteps?: string[];
+  pipelineStep?: number;
   executions?: { executionId: number; source: string }[];
   request?: {
     parentCommandId: string;
@@ -113,6 +114,7 @@ type OptimisticAssistantState = {
   model?: string;
   mode?: 'instant' | 'think';
   progressSteps?: string[];
+  pipelineStep: number;
 };
 
 const CHAT_INPUT_LIMIT = 12000;
@@ -129,7 +131,10 @@ export default function ProjectView({ params }: { params: { id: string } }) {
   const [nodes, setNodes] = useState<WorkspaceNode[]>([]);
   const [selectedNode, setSelectedNode] = useState<WorkspaceNode | null>(null);
   const [mainPanelView, setMainPanelView] = useState<'explorer' | 'chat' | 'script' | 'timeline'>('chat');
-  const [activeSidebarTab, setActiveSidebarTab] = useState<'explorer' | 'chat' | 'timeline' | 'script'>('chat');
+  const [activeSidebarTab, setActiveSidebarTab] = useState<'explorer' | 'chat' | 'timeline' | 'script' | 'context'>('chat');
+  const [contextItems, setContextItems] = useState<{ id: string; text: string; done: boolean }[]>([]);
+  const [contextInput, setContextInput] = useState('');
+  const [contextSaving, setContextSaving] = useState(false);
   const [selectedModel, setSelectedModel] = useState('GPT-5.4 Mini');
   const [agentMode, setAgentMode] = useState<'instant' | 'think'>('instant');
   const [availableModels, setAvailableModels] = useState<string[]>([...SUPPORTED_MODEL_OPTIONS]);
@@ -152,6 +157,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
   const lastActiveChatIdRef = useRef<string | null>(null);
   const seenServerLogIntentIdsRef = useRef<Set<string>>(new Set());
   const hydratedServerLogIntentsRef = useRef(false);
+  const thinkPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const totalNodeCount = useMemo(() => countNodes(nodes), [nodes]);
   const selectedNodeSummary = useMemo(() => getNodeSummary(selectedNode), [selectedNode]);
   const selectedNodeProperties = useMemo(() => getNodePropertyEntries(selectedNode), [selectedNode]);
@@ -222,6 +228,9 @@ export default function ProjectView({ params }: { params: { id: string } }) {
       });
       const data = res.data;
       setProject(data);
+      if (Array.isArray(data?.contextState)) {
+        setContextItems(data.contextState);
+      }
       const nextAvailableModels = Array.isArray(data?.availableModels) && data.availableModels.length > 0
         ? data.availableModels.filter((item: any) => typeof item === 'string')
         : [];
@@ -254,6 +263,12 @@ export default function ProjectView({ params }: { params: { id: string } }) {
     const infoInterval = setInterval(fetchProjectAndData, 3000); // Polling status, explorer e comandos
     return () => clearInterval(infoInterval);
   }, [params.id]);
+
+  useEffect(() => {
+    return () => {
+      if (thinkPollRef.current) clearInterval(thinkPollRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     const activeChatChanged = lastActiveChatIdRef.current !== activeChat.id;
@@ -429,47 +444,164 @@ export default function ProjectView({ params }: { params: { id: string } }) {
         agentMode === 'think'
           ? ['Analisando projeto...', 'Buscando scripts relacionados...', 'Planejando solução...']
           : [],
+      pipelineStep: 1,
     });
+
+    // Para o modo Instant, avança visualmente do step 1→2 após 900ms enquanto aguarda o backend.
+    let instantStepTimer: ReturnType<typeof setTimeout> | null = window.setTimeout(() => {
+      instantStepTimer = null;
+      setOptimisticAssistant((prev) => prev ? { ...prev, pipelineStep: 2 } : prev);
+    }, 900);
 
     try {
       const token = localStorage.getItem('blox_token');
-      const response = await api.post(`/api/projects/${params.id}/chat`, {
-        headers: { Authorization: `Bearer ${token}` },
-        body: {
-          projectId: params.id,
-          intent: userMsg,
-          chatId: sendingChat.id,
-          chatTitle: sendingChat.title,
-          model: selectedModel,
-          mode: agentMode,
-        }  
-      });
-      const responseData = response.data;
 
-      if (responseData && responseData?.aiResult) {
-        setOptimisticAssistant({
-          chatId: sendingChat.id,
-          userMessage: userMsg,
-          content: String(
-            responseData.aiResult.structuredResponse?.message ||
-            responseData.aiResult.reply ||
-            responseData.aiResult.commands ||
-            responseData.aiResult.plan ||
-            'Resposta pronta.'
-          ),
-          kind: normalizeResponseType(responseData.aiResult.responseType),
-          phase: 'writing',
-          model: responseData.aiResult.selectedAgents?.[0]?.model || selectedModel,
-          mode: agentMode,
-          progressSteps: [],
-        });
+      if (agentMode === 'think') {
+        // ── Think mode: cria job, retorna 202, polling para resultado ────────
+        const response = await api.post(
+          `/api/projects/${params.id}/chat`,
+          { intent: userMsg, chatId: sendingChat.id, chatTitle: sendingChat.title, model: selectedModel, mode: 'think' },
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (instantStepTimer) { clearTimeout(instantStepTimer); instantStepTimer = null; }
+        const responseData = response.data;
+
+        if (responseData?.mode === 'think' && responseData?.taskId) {
+          const taskId = responseData.taskId as string;
+          if (thinkPollRef.current) clearInterval(thinkPollRef.current);
+          thinkPollRef.current = setInterval(async () => {
+            try {
+              const pollToken = localStorage.getItem('blox_token');
+              const pollRes = await api.get(
+                `/api/projects/${params.id}/chat/task/${taskId}`,
+                { headers: { Authorization: `Bearer ${pollToken}` } }
+              );
+              const poll = pollRes.data;
+              if (poll.status === 'processing') {
+                setOptimisticAssistant((prev) => prev ? { ...prev, pipelineStep: 2 } : prev);
+              } else if (poll.status === 'done' && poll.aiResult) {
+                clearInterval(thinkPollRef.current!);
+                thinkPollRef.current = null;
+                setOptimisticAssistant({
+                  chatId: sendingChat.id,
+                  userMessage: userMsg,
+                  content: String(
+                    poll.aiResult.structuredResponse?.message ||
+                    poll.aiResult.reply ||
+                    poll.aiResult.commands ||
+                    poll.aiResult.plan ||
+                    'Resposta pronta.'
+                  ),
+                  kind: normalizeResponseType(poll.aiResult.responseType),
+                  phase: 'writing',
+                  model: poll.aiResult.selectedAgents?.[0]?.model || selectedModel,
+                  mode: 'think',
+                  progressSteps: [],
+                  pipelineStep: 3,
+                });
+                fetchProjectAndData();
+              } else if (poll.status === 'failed') {
+                clearInterval(thinkPollRef.current!);
+                thinkPollRef.current = null;
+                setComposerNotice(poll.error || 'A tarefa Think falhou.');
+                setInput(userMsg);
+                setOptimisticAssistant(null);
+              }
+            } catch (pollErr) {
+              console.error('[Think poll] erro ao consultar tarefa:', pollErr);
+            }
+          }, 2500);
+          return;
+        }
+
+        // Fallback: backend respondeu síncrono mesmo em modo think
+        if (responseData?.aiResult) {
+          setOptimisticAssistant({
+            chatId: sendingChat.id, userMessage: userMsg,
+            content: String(responseData.aiResult.structuredResponse?.message || responseData.aiResult.reply || 'Resposta pronta.'),
+            kind: normalizeResponseType(responseData.aiResult.responseType),
+            phase: 'writing', model: responseData.aiResult.selectedAgents?.[0]?.model || selectedModel,
+            mode: 'think', progressSteps: [], pipelineStep: 3,
+          });
+        } else {
+          setComposerNotice(responseData?.error || 'Erro ao processar a mensagem.');
+          setInput(userMsg); setOptimisticAssistant(null);
+        }
+        fetchProjectAndData();
+
       } else {
-        setComposerNotice(responseData?.error || 'Erro ao processar a mensagem do chat.');
-        setInput(userMsg);
-        setOptimisticAssistant(null);
+        // ── Instant mode: SSE streaming de tokens em tempo real ───────────────
+        const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) || '';
+        const streamResp = await fetch(
+          `${backendUrl}/api/projects/${params.id}/chat/stream`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ intent: userMsg, chatId: sendingChat.id, chatTitle: sendingChat.title, model: selectedModel }),
+          }
+        );
+        if (instantStepTimer) { clearTimeout(instantStepTimer); instantStepTimer = null; }
+
+        if (!streamResp.ok || !streamResp.body) {
+          const errText = await streamResp.text().catch(() => '');
+          throw new Error(errText || 'Stream indisponível');
+        }
+
+        const reader = streamResp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let accContent = '';
+
+        outer: while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop() ?? '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data:')) continue;
+            const raw = trimmed.slice(5).trim();
+            try {
+              const evt = JSON.parse(raw);
+              if (evt.type === 'start') {
+                setOptimisticAssistant((prev) => prev ? { ...prev, pipelineStep: 2, phase: 'writing' } : prev);
+              } else if (evt.type === 'token' && evt.token) {
+                accContent += evt.token as string;
+                setOptimisticAssistant((prev) => prev ? { ...prev, content: accContent, phase: 'writing' } : prev);
+              } else if (evt.type === 'done') {
+                const aiRes = evt.aiResult;
+                setOptimisticAssistant({
+                  chatId: sendingChat.id,
+                  userMessage: userMsg,
+                  content: String(
+                    aiRes?.structuredResponse?.message ||
+                    aiRes?.reply ||
+                    accContent ||
+                    'Resposta pronta.'
+                  ),
+                  kind: normalizeResponseType(aiRes?.responseType),
+                  phase: 'writing',
+                  model: aiRes?.selectedAgents?.[0]?.model || selectedModel,
+                  mode: 'instant',
+                  progressSteps: [],
+                  pipelineStep: 3,
+                });
+                fetchProjectAndData();
+                break outer;
+              } else if (evt.type === 'error') {
+                setComposerNotice((evt.error as string) || 'Erro no stream.');
+                setInput(userMsg);
+                setOptimisticAssistant(null);
+                break outer;
+              }
+            } catch {}
+          }
+        }
       }
-      fetchProjectAndData();
     } catch (e) {
+      if (instantStepTimer) { clearTimeout(instantStepTimer); instantStepTimer = null; }
       console.error(e);
       setComposerNotice('Erro ao processar a mensagem do chat.');
       setInput(userMsg);
@@ -512,6 +644,44 @@ export default function ProjectView({ params }: { params: { id: string } }) {
       setActiveSidebarTab('script');
     }
     setIsInspectorCollapsed(false);
+  };
+
+  const saveContextItems = async (items: { id: string; text: string; done: boolean }[]) => {
+    setContextSaving(true);
+    try {
+      const token = localStorage.getItem('blox_token');
+      await api.put(
+        `/api/projects/${params.id}/context`,
+        { contextState: items },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+    } catch (e) {
+      console.error('[context] falha ao salvar:', e);
+    } finally {
+      setContextSaving(false);
+    }
+  };
+
+  const handleContextAdd = () => {
+    const text = contextInput.trim();
+    if (!text) return;
+    const item = { id: `ctx-${Date.now()}-${Math.random().toString(36).slice(2)}`, text, done: false };
+    const next = [...contextItems, item];
+    setContextItems(next);
+    setContextInput('');
+    saveContextItems(next);
+  };
+
+  const handleContextToggle = (id: string) => {
+    const next = contextItems.map((item) => item.id === id ? { ...item, done: !item.done } : item);
+    setContextItems(next);
+    saveContextItems(next);
+  };
+
+  const handleContextDelete = (id: string) => {
+    const next = contextItems.filter((item) => item.id !== id);
+    setContextItems(next);
+    saveContextItems(next);
   };
 
   const appendReferencesToComposer = (references: string[]) => {
@@ -598,7 +768,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
     }
   };
 
-  const handleSidebarTabChange = (tab: 'explorer' | 'chat' | 'timeline' | 'script') => {
+  const handleSidebarTabChange = (tab: 'explorer' | 'chat' | 'timeline' | 'script' | 'context') => {
     setActiveSidebarTab(tab);
 
     if (tab === 'chat') {
@@ -630,44 +800,60 @@ export default function ProjectView({ params }: { params: { id: string } }) {
   };
 
   const showExplorerPane = activeSidebarTab === 'explorer' && !isExplorerPaneCollapsed;
-  const showMainPane = activeSidebarTab === 'chat' || activeSidebarTab === 'timeline' || activeSidebarTab === 'script';
+  const showMainPane = activeSidebarTab === 'chat' || activeSidebarTab === 'timeline' || activeSidebarTab === 'script' || activeSidebarTab === 'context';
   const showMobileTimeline = activeSidebarTab === 'timeline';
 
-  if (!project) return <div className="h-screen bg-slate-900 text-white flex items-center justify-center">Carregando...</div>;
-  return (
-    <div className="h-screen w-full bg-slate-900 text-slate-100 flex overflow-hidden">
-      
-      {/* SIDEBAR NAVEGAÇÃO */}
-      <aside className="w-16 md:w-64 bg-slate-950 border-r border-slate-800 flex flex-col transition-all">
-        <div className="p-4 border-b border-slate-800 flex items-center justify-center md:justify-start">
-          <Link href="/dashboard" className="text-blue-500 hover:text-blue-400">
-            <ArrowLeft className="w-5 h-5 md:mr-2" />
-          </Link>
-          <span className="hidden md:block font-bold truncate">{project.name}</span>
+  if (!project) return (
+    <div className="h-screen flex items-center justify-center" style={{ background: 'var(--bg)' }}>
+      <div className="flex flex-col items-center gap-3">
+        <div className="w-8 h-8 rounded-xl bg-blue-500/15 border border-blue-500/25 flex items-center justify-center">
+          <Bot className="w-4 h-4 text-blue-400 animate-pulse" />
         </div>
-        
-        <nav className="flex-1 py-4 flex flex-col gap-2">
+        <span className="text-slate-400 text-sm">Carregando projeto...</span>
+      </div>
+    </div>
+  );
+  return (
+    <div className="h-screen w-full text-slate-100 flex overflow-hidden" style={{ background: 'var(--bg)' }}>
+
+      {/* SIDEBAR NAVEGAÇÃO */}
+      <aside className="w-16 md:w-64 flex flex-col transition-all flex-shrink-0" style={{ background: 'var(--bg-surface)', borderRight: '1px solid var(--border)' }}>
+        <div className="p-4 flex items-center justify-center md:justify-start gap-2" style={{ borderBottom: '1px solid var(--border)' }}>
+          <Link to="/dashboard" className="w-7 h-7 rounded-lg flex items-center justify-center text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 transition-colors flex-shrink-0">
+            <ArrowLeft className="w-4 h-4" />
+          </Link>
+          <span className="hidden md:block text-sm font-semibold truncate text-white">{project.name}</span>
+        </div>
+
+        <nav className="flex-1 py-3 px-2 flex flex-col gap-1">
           <NavItem icon={<Folder />} label="Explorer" active={activeSidebarTab === 'explorer'} onClick={() => handleSidebarTabChange('explorer')} />
           <NavItem icon={<MessageSquare />} label="Chat" active={activeSidebarTab === 'chat'} onClick={() => handleSidebarTabChange('chat')} />
           <NavItem icon={<History />} label="Timeline" active={activeSidebarTab === 'timeline'} onClick={() => handleSidebarTabChange('timeline')} />
           <NavItem icon={<FileCode />} label="Script" active={activeSidebarTab === 'script'} onClick={() => handleSidebarTabChange('script')} disabled={!isSelectedNodeScript} />
+          <NavItem
+            icon={<Pin />}
+            label="Contexto"
+            active={activeSidebarTab === 'context'}
+            onClick={() => handleSidebarTabChange('context')}
+            badge={contextItems.filter((i) => !i.done).length || undefined}
+          />
         </nav>
 
-        <div className="p-4 border-t border-slate-800 text-xs text-slate-400 flex flex-col gap-2">
+        <div className="p-4 flex flex-col gap-2" style={{ borderTop: '1px solid var(--border)' }}>
           <div className="flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${syncState.studioDotClass}`}></span>
-            <span className="hidden md:block">Studio: {syncState.studioLabel}</span>
+            <span className={`w-2 h-2 rounded-full flex-shrink-0 ${syncState.studioDotClass}`}></span>
+            <span className="hidden md:block text-xs text-slate-500">Studio: {syncState.studioLabel}</span>
           </div>
-          <div className={`hidden md:block ${syncState.syncTextClass}`}>{syncState.syncLabel}</div>
+          <div className={`hidden md:block text-xs ${syncState.syncTextClass}`}>{syncState.syncLabel}</div>
         </div>
       </aside>
 
       {/* ÁREA PRINCIPAL */}
-      <main className="flex-1 min-w-0 flex flex-col xl:flex-row h-full">
-        
+      <main className="flex-1 min-w-0 flex flex-col xl:flex-row h-full overflow-hidden">
+
         {/* EXPLORER SINCRONIZADO */}
-        <section className={`${showExplorerPane ? 'flex' : 'hidden'} ${isExplorerPaneCollapsed ? 'xl:hidden' : 'xl:flex xl:w-[38%]'} w-full border-r border-slate-800 flex-col bg-slate-900`}>
-          <div className="p-3 border-b border-slate-800 font-semibold flex justify-between items-center bg-slate-900/80">
+        <section className={`${showExplorerPane ? 'flex' : 'hidden'} ${isExplorerPaneCollapsed ? 'xl:hidden' : 'xl:flex xl:w-[38%]'} w-full flex-col`} style={{ borderRight: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
+          <div className="p-3 font-semibold flex justify-between items-center" style={{ borderBottom: '1px solid var(--border)', background: 'rgba(13,22,38,0.8)' }}>
             <div>
               <div>Explorer (DataModel)</div>
               <div className="mt-1 text-[10px] uppercase tracking-wide text-slate-500">Clique na seta para expandir ou minimizar</div>
@@ -734,7 +920,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
           
           {/* PAINEL DE DETALHES / PREVIEW */}
           {!isInspectorCollapsed && (
-            <div className="h-[48%] border-t border-slate-800 bg-slate-950 p-4 overflow-y-auto">
+            <div className="h-[48%] p-4 overflow-y-auto" style={{ borderTop: '1px solid var(--border)', background: 'var(--bg)' }}>
             {selectedNode ? (
               <>
                 <div className="mb-3 flex items-start justify-between gap-3">
@@ -819,8 +1005,8 @@ export default function ProjectView({ params }: { params: { id: string } }) {
         </section>
 
         {/* AREA PRINCIPAL INTERATIVA */}
-        <section className={`${showMainPane ? 'flex' : 'hidden'} xl:flex min-w-0 flex-1 flex-col bg-slate-900 relative`}>
-          <div className="border-b border-slate-800 bg-slate-950 px-4 py-3">
+        <section className={`${showMainPane ? 'flex' : 'hidden'} xl:flex min-w-0 flex-1 flex-col relative overflow-hidden`} style={{ background: 'var(--bg)' }}>
+          <div className="px-4 py-3" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <div className="rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-2">
@@ -917,9 +1103,119 @@ export default function ProjectView({ params }: { params: { id: string } }) {
           </div>
 
           {mainPanelView === 'chat' ? (
-            activeSidebarTab === 'timeline' ? (
+            activeSidebarTab === 'context' ? (
               <div className="flex min-h-0 flex-1 flex-col">
-                <div className="border-b border-slate-800 bg-slate-900/60 px-4 py-3">
+                {/* Header */}
+                <div className="px-4 py-3 flex items-center justify-between gap-3" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <Pin className="h-4 w-4 text-violet-400" />
+                      <span className="text-sm font-semibold text-white">Contexto do Projeto</span>
+                      {contextSaving && <span className="text-[10px] text-slate-500 animate-pulse">salvando...</span>}
+                    </div>
+                    <div className="mt-0.5 text-xs text-slate-500">
+                      Itens <span className="text-violet-300">não concluídos</span> são injetados automaticamente em toda mensagem da IA.
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleSidebarTabChange('chat')}
+                    className="rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-200 transition hover:border-slate-600 hover:bg-slate-800"
+                  >
+                    Voltar ao chat
+                  </button>
+                </div>
+
+                {/* Add input */}
+                <div className="px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
+                  <form
+                    onSubmit={(e) => { e.preventDefault(); handleContextAdd(); }}
+                    className="flex gap-2"
+                  >
+                    <input
+                      type="text"
+                      value={contextInput}
+                      onChange={(e) => setContextInput(e.target.value)}
+                      placeholder="Adicionar item ao contexto..."
+                      className="input text-sm flex-1"
+                      maxLength={500}
+                    />
+                    <button
+                      type="submit"
+                      disabled={!contextInput.trim()}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-semibold transition disabled:opacity-40"
+                      style={{ background: 'rgba(140,70,255,0.15)', borderColor: 'rgba(140,70,255,0.30)', color: '#c084fc' }}
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      Adicionar
+                    </button>
+                  </form>
+                </div>
+
+                {/* List */}
+                <div className="flex-1 overflow-y-auto p-4">
+                  {contextItems.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
+                      <Pin className="w-8 h-8 text-slate-700" />
+                      <div className="text-slate-600 text-sm">Nenhum item no contexto.</div>
+                      <div className="text-slate-700 text-xs max-w-xs">
+                        Adicione tarefas, metas ou notas que a IA deve considerar em todas as respostas deste projeto.
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {contextItems.map((item) => (
+                        <div
+                          key={item.id}
+                          className="flex items-start gap-3 p-3 rounded-xl border transition-all group"
+                          style={{
+                            background: item.done ? 'transparent' : 'rgba(140,70,255,0.05)',
+                            borderColor: item.done ? 'rgba(255,255,255,0.05)' : 'rgba(140,70,255,0.15)',
+                          }}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => handleContextToggle(item.id)}
+                            className="mt-0.5 shrink-0 transition-colors"
+                          >
+                            {item.done
+                              ? <CheckSquare2 className="w-4 h-4 text-emerald-500" />
+                              : <Square className="w-4 h-4 text-violet-400" />
+                            }
+                          </button>
+                          <span className={`flex-1 text-sm leading-relaxed break-words ${item.done ? 'line-through text-slate-600' : 'text-slate-200'}`}>
+                            {item.text}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleContextDelete(item.id)}
+                            className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity text-slate-600 hover:text-red-400"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {contextItems.some((i) => i.done) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = contextItems.filter((i) => !i.done);
+                        setContextItems(next);
+                        saveContextItems(next);
+                      }}
+                      className="mt-4 text-xs text-slate-600 hover:text-red-400 transition-colors"
+                    >
+                      Limpar concluídos ({contextItems.filter((i) => i.done).length})
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : activeSidebarTab === 'timeline' ? (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="px-4 py-3" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <div className="flex items-center gap-2">
@@ -963,8 +1259,8 @@ export default function ProjectView({ params }: { params: { id: string } }) {
               </div>
             ) : (
             <div className="flex min-h-0 flex-1">
-              <aside className={`${isChatListCollapsed ? 'hidden' : 'hidden xl:flex xl:flex-col'} w-72 shrink-0 border-r border-slate-800 bg-slate-950/70`}>
-                <div className="border-b border-slate-800 px-4 py-3">
+              <aside className={`${isChatListCollapsed ? 'hidden' : 'hidden xl:flex xl:flex-col'} w-72 shrink-0`} style={{ borderRight: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
+                <div className="px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
                   <div className="text-xs uppercase tracking-wide text-slate-500">Chats do Projeto</div>
                   <div className="mt-1 text-sm text-slate-300">Histórico persistido por conversa</div>
                   <div className="relative mt-3">
@@ -1061,7 +1357,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
               </aside>
 
               <div className="flex min-w-0 flex-1 flex-col">
-                <div className="border-b border-slate-800 bg-slate-900/60 px-4 py-3">
+                <div className="px-4 py-3" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <div className="flex items-center gap-2">
@@ -1124,7 +1420,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                   </div>
                 </div>
 
-                <div className="xl:hidden border-b border-slate-800 bg-slate-950/50 px-4 py-3">
+                <div className="xl:hidden px-4 py-3" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
                   <div className="mb-2 text-[10px] uppercase tracking-wide text-slate-500">Conversas</div>
                   <div className="flex gap-2 overflow-x-auto pb-1">
                     {visibleChatSessions.map((chat) => (
@@ -1177,15 +1473,16 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                             {msg.mode && <span className="text-[10px] text-slate-500">{msg.mode === 'think' ? 'Think' : 'Instant'}</span>}
                           </div>
                         )}
-                        <div className={`${msg.role === 'user' ? 'bg-blue-600 rounded-tr-none' : 'bg-slate-800 rounded-tl-none'} p-3 rounded-lg text-sm whitespace-pre-wrap`}>
+                        <div className={`p-4 rounded-2xl text-sm whitespace-pre-wrap leading-relaxed ${msg.role === 'user' ? 'rounded-tr-sm text-white' : 'rounded-tl-sm'}`} style={msg.role === 'user' ? { background: 'var(--accent)', boxShadow: '0 2px 12px rgba(59,130,246,0.25)' } : { background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>
                           {msg.role === 'ai' ? (
                             <>
                               <TypewriterContent
                                 content={msg.content}
-                                animate={msg.phase === 'writing'}
+                                animate={msg.phase === 'writing' && msg.mode === 'think'}
                                 thinking={msg.phase === 'thinking'}
                                 executions={msg.executions || []}
                                 progressSteps={msg.progressSteps || []}
+                                pipelineStep={msg.pipelineStep ?? 1}
                               />
                               {msg.request && (
                                 <RequestExecutionPanel
@@ -1202,7 +1499,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                     ))}
                   </div>
 
-                  <div className="p-4 border-t border-slate-800 bg-slate-950">
+                  <div className="p-4" style={{ borderTop: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
                     {composerReferences.length > 0 && (
                       <div className="mb-3 rounded-2xl border border-slate-800 bg-slate-900/70 p-3">
                         <div className="mb-2 flex items-center justify-between gap-2">
@@ -1268,7 +1565,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                       </div>
                     </div>
 
-                    <div className="relative rounded-[26px] border border-slate-800 bg-slate-900/70 p-2">
+                    <div className="relative rounded-2xl p-2" style={{ border: '1px solid var(--border-strong)', background: 'var(--bg-elevated)' }}>
                       <textarea
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
@@ -1280,20 +1577,19 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         }}
                         placeholder="Digite uma tarefa..."
                         disabled={isChatBusy}
-                        className={`min-h-[112px] w-full resize-none rounded-[22px] border pl-4 pr-12 py-3 text-white focus:outline-none focus:ring-2 ${
-                          isChatBusy
-                            ? 'cursor-not-allowed border-slate-800 bg-slate-900/80 text-slate-500 focus:ring-slate-800'
-                            : 'border-slate-700 bg-slate-800/80 focus:ring-blue-500'
+                        className={`min-h-[112px] w-full resize-none rounded-xl bg-transparent pl-4 pr-12 py-3 text-white focus:outline-none text-sm leading-relaxed ${
+                          isChatBusy ? 'cursor-not-allowed text-slate-500' : ''
                         }`}
+                        style={{ caretColor: '#60a5fa' }}
                       />
                       <button
                         onClick={handleSend}
                         disabled={isChatBusy}
-                        className={`absolute right-2 rounded-md p-2 text-white transition ${
-                          isChatBusy ? 'cursor-not-allowed bg-slate-700' : 'bg-blue-600 hover:bg-blue-500'
+                        className={`absolute right-3 bottom-3 w-8 h-8 rounded-xl flex items-center justify-center text-white transition-all ${
+                          isChatBusy ? 'cursor-not-allowed opacity-30' : 'bg-blue-600 hover:bg-blue-500 hover:shadow-lg'
                         }`}
                       >
-                        <Send className="w-4 h-4" />
+                        <Send className="w-3.5 h-3.5" />
                       </button>
                     </div>
                     <div className="mt-2 flex items-center justify-between gap-2 text-xs text-slate-400">
@@ -1366,26 +1662,32 @@ function NavItem({
   active = false,
   disabled = false,
   onClick,
+  badge,
 }: {
   icon: React.ReactNode;
   label: string;
   active?: boolean;
   disabled?: boolean;
   onClick?: () => void;
+  badge?: number;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`flex w-full items-center gap-3 px-4 py-3 text-left transition-colors ${
-        active
-          ? 'border-r-2 border-blue-500 bg-blue-900/20 text-blue-400'
-          : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'
-      } ${disabled ? 'cursor-not-allowed opacity-40 hover:bg-transparent hover:text-slate-500' : 'cursor-pointer'}`}
+      className={`nav-item w-full ${active ? 'active' : ''} ${disabled ? 'opacity-30 cursor-not-allowed' : ''}`}
+      style={disabled ? { pointerEvents: 'none' } : undefined}
     >
-      <div className="w-5 h-5 flex items-center justify-center">{icon}</div>
-      <span className="hidden md:block text-sm font-medium">{label}</span>
+      <div className="relative w-4 h-4 flex items-center justify-center flex-shrink-0" style={{ width: 16, height: 16 }}>
+        {icon}
+        {badge != null && badge > 0 && (
+          <span className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 rounded-full text-[8px] font-bold flex items-center justify-center" style={{ background: '#8C46FF', color: '#fff' }}>
+            {badge > 9 ? '9+' : badge}
+          </span>
+        )}
+      </div>
+      <span className="hidden md:block text-sm">{label}</span>
     </button>
   );
 }
@@ -1918,6 +2220,7 @@ function buildChatMessages(
       model: optimisticAssistant.model,
       mode: optimisticAssistant.mode,
       progressSteps: optimisticAssistant.progressSteps,
+      pipelineStep: optimisticAssistant.pipelineStep,
       executions: [],
     });
   }
@@ -2070,18 +2373,76 @@ function getMessageKindTone(kind?: 'conversation' | 'analysis' | 'proposal') {
   return 'border-blue-500/30 bg-blue-500/10 text-blue-200';
 }
 
+const PIPELINE_STEPS = ['Enviado', 'Roteando', 'IA Gerando', 'Finalizado'] as const;
+
+function PipelineStepper({ step }: { step: number }) {
+  return (
+    <div className="flex items-start gap-0 w-full pt-1 pb-2">
+      {PIPELINE_STEPS.map((label, i) => {
+        const isDone = i < step;
+        const isActive = i === step;
+        return (
+          <React.Fragment key={label}>
+            <div className="flex flex-col items-center gap-1.5 flex-shrink-0">
+              <div
+                className={`w-5 h-5 rounded-full flex items-center justify-center transition-all duration-300 ${
+                  isDone
+                    ? 'bg-emerald-500/20 border border-emerald-500/60 text-emerald-400'
+                    : isActive
+                    ? 'bg-violet-500/20 border border-violet-400/60 text-violet-300'
+                    : 'bg-slate-800 border border-slate-700 text-slate-600'
+                }`}
+                style={isActive ? { boxShadow: '0 0 8px rgba(167,139,250,0.4)' } : undefined}
+              >
+                {isDone ? (
+                  <svg className="w-2.5 h-2.5" viewBox="0 0 10 10" fill="none">
+                    <path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                ) : (
+                  <span className={`text-[8px] font-bold ${isActive ? 'animate-pulse' : ''}`}>{i + 1}</span>
+                )}
+              </div>
+              <span
+                className={`text-[9px] font-medium leading-tight text-center whitespace-nowrap ${
+                  isDone ? 'text-emerald-400/80' : isActive ? 'text-violet-300' : 'text-slate-600'
+                }`}
+              >
+                {label}
+              </span>
+            </div>
+            {i < PIPELINE_STEPS.length - 1 && (
+              <div
+                className="flex-1 h-px mt-2.5 mx-1 transition-all duration-500"
+                style={{
+                  background: i < step
+                    ? 'rgba(52,211,153,0.4)'
+                    : i === step - 1
+                    ? 'linear-gradient(to right, rgba(52,211,153,0.4), rgba(167,139,250,0.3))'
+                    : 'rgba(51,65,85,0.6)',
+                }}
+              />
+            )}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
 function TypewriterContent({
   content,
   animate,
   thinking,
   executions,
   progressSteps,
+  pipelineStep = 1,
 }: {
   content: string;
   animate?: boolean;
   thinking?: boolean;
   executions?: { executionId: number; source: string }[];
   progressSteps?: string[];
+  pipelineStep?: number;
 }) {
   const [visibleContent, setVisibleContent] = useState(animate ? '' : content);
   const [stepIndex, setStepIndex] = useState(0);
@@ -2125,35 +2486,20 @@ function TypewriterContent({
 
   if (thinking) {
     return (
-      <div className="w-full max-w-md rounded-2xl border border-violet-500/20 bg-violet-500/10 px-3 py-2.5 text-slate-100">
-        <div className="flex items-center justify-between gap-3">
+      <div className="w-full rounded-2xl border border-violet-500/20 bg-violet-500/10 px-3 py-3 text-slate-100">
+        <div className="flex items-center justify-between gap-3 mb-3">
           <div className="flex items-center gap-2">
             <span className="inline-flex gap-1">
-              <span className="h-2 w-2 animate-pulse rounded-full bg-violet-300" />
-              <span className="h-2 w-2 animate-pulse rounded-full bg-violet-300 [animation-delay:120ms]" />
-              <span className="h-2 w-2 animate-pulse rounded-full bg-violet-300 [animation-delay:240ms]" />
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-300" />
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-300 [animation-delay:120ms]" />
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-300 [animation-delay:240ms]" />
             </span>
-            <span className="text-xs font-medium text-violet-100">Thinking</span>
+            <span className="text-xs font-medium text-violet-100">Processando</span>
           </div>
-          <span className="text-[10px] uppercase tracking-wide text-violet-200/70">TreinAI Agent</span>
+          <span className="text-[10px] uppercase tracking-wide text-violet-200/70">BloxAI Agent</span>
         </div>
-        <div className="mt-2 text-sm text-slate-100">{visibleContent}</div>
-        {progressSteps && progressSteps.length > 1 && (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {progressSteps.map((step, index) => (
-              <span
-                key={`${step}-${index}`}
-                className={`rounded-full border px-2 py-0.5 text-[10px] ${
-                  index === stepIndex
-                    ? 'border-violet-300/40 bg-violet-300/15 text-violet-50'
-                    : 'border-white/10 bg-white/5 text-slate-300'
-                }`}
-              >
-                {step}
-              </span>
-            ))}
-          </div>
-        )}
+        <PipelineStepper step={pipelineStep} />
+        <div className="mt-2 text-xs text-slate-400 italic">{visibleContent}</div>
       </div>
     );
   }

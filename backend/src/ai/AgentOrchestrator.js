@@ -436,6 +436,9 @@ export class AgentOrchestrator {
       context.project?.selectedNodeClassName ? `TipoNode: ${context.project.selectedNodeClassName}` : '',
       context.project?.selectedNodeSummary ? `ResumoNode: ${this.limit(context.project.selectedNodeSummary, 260)}` : '',
       context.project?.selectedScriptSummary ? `ResumoScript: ${this.limit(context.project.selectedScriptSummary, 260)}` : '',
+      Array.isArray(context.project?.contextState) && context.project.contextState.length > 0
+        ? `ContextoAtivoDoUsuario:\n${context.project.contextState.map((t) => `- ${t}`).join('\n')}`
+        : '',
     ]
       .filter(Boolean)
       .join('\n');

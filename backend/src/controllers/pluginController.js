@@ -1,51 +1,51 @@
 import jwt from 'jsonwebtoken';
-import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { JWT_SECRET } from '../config/env.js';
 import { User } from '../models/User.js';
 import { Project } from '../models/Project.js';
 
+/**
+ * Autenticação do plugin do Roblox Studio.
+ * O plugin usa a apiKey do projeto (gerada e exibida no dashboard web)
+ * em vez de email/senha — compatível com autenticação Roblox OAuth.
+ *
+ * Body: { apiKey, placeId, placeName? }
+ */
 export const pluginAuth = async (req, res) => {
   try {
-    const { email, password, placeId, placeName } = req.body || {};
+    const { apiKey, placeId, placeName } = req.body || {};
 
-    if (!email || !password || !placeId) {
-      return res.status(400).json({ error: 'Email, senha e placeId são obrigatórios' });
+    if (!apiKey || !placeId) {
+      return res.status(400).json({ error: 'apiKey e placeId são obrigatórios.' });
     }
 
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(401).json({ error: 'Credenciais inválidas' });
-    }
-
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(401).json({ error: 'Credenciais inválidas' });
-    }
-
-    const token = jwt.sign({ id: user._id, plan: user.plan }, JWT_SECRET, { expiresIn: '30d' });
-
-    let project = await Project.findOne({ placeId: String(placeId), owner: user._id });
+    // Busca o projeto pela apiKey
+    const project = await Project.findOne({ apiKey: String(apiKey), placeId: String(placeId) });
     if (!project) {
-      const apiKey = crypto.randomBytes(32).toString('hex');
-      project = await Project.create({
-        name: placeName || `Projeto ${placeId}`,
-        placeId: String(placeId),
-        owner: user._id,
-        apiKey,
-      });
+      return res.status(401).json({ error: 'apiKey ou placeId inválidos.' });
     }
+
+    // Verifica status do dono
+    const user = await User.findById(project.owner);
+    if (!user) {
+      return res.status(401).json({ error: 'Conta do proprietário não encontrada.' });
+    }
+    if (user.status === 'banned') {
+      return res.status(403).json({ error: 'Conta banida.' });
+    }
+
+    const token = jwt.sign(
+      { id: user._id, robloxId: user.robloxId, username: user.robloxUsername, role: user.role, planType: user.planType },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
 
     return res.json({
       token,
-      project: {
-        id: project._id,
-        name: project.name,
-        apiKey: project.apiKey,
-      },
+      project: { id: project._id, name: project.name, apiKey: project.apiKey },
     });
   } catch (error) {
     console.error('[Plugin Auth Error]', error);
-    return res.status(500).json({ error: 'Erro interno no servidor' });
+    return res.status(500).json({ error: 'Erro interno no servidor.' });
   }
 };

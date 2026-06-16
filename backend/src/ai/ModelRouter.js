@@ -122,6 +122,210 @@ export class ModelRouter {
     };
   }
 
+  // ─── Streaming ────────────────────────────────────────────────────────────────
+
+  /**
+   * Chama o modelo com streaming habilitado. Invoca `onToken(delta)` para cada
+   * pedaço de texto recebido e retorna o resultado completo ao final.
+   */
+  static async generateResponseStream(prompt, modelOrOptions = 'DeepSeek-V3', onToken) {
+    const options =
+      typeof modelOrOptions === 'string'
+        ? { model: modelOrOptions }
+        : { ...modelOrOptions };
+
+    const routedModel = this.resolveModelLabel(options.model);
+    console.log(`[ModelRouter] Stream para: ${routedModel.label}`);
+
+    try {
+      if (routedModel.provider === 'anthropic') {
+        return await this.streamAnthropic(
+          ANTHROPIC_API_KEY,
+          routedModel.apiModel,
+          prompt,
+          options.systemPrompt || 'Você é um assistente de IA focado em desenvolvimento para Roblox Studio.',
+          options.maxTokens,
+          options.temperature,
+          onToken
+        );
+      }
+
+      const apiKey = routedModel.label === 'GPT-5.4 Mini' ? OPENAI_API_KEY : DEEPSEEK_API_KEY;
+      const url =
+        routedModel.label === 'GPT-5.4 Mini'
+          ? 'https://api.openai.com/v1/chat/completions'
+          : 'https://api.deepseek.com/v1/chat/completions';
+
+      return await this.streamOpenAICompatible(
+        url,
+        apiKey,
+        routedModel.apiModel,
+        prompt,
+        options.systemPrompt || 'Você é um assistente de IA focado em desenvolvimento para Roblox Studio.',
+        options.maxTokens,
+        options.temperature,
+        onToken
+      );
+    } catch (error) {
+      console.error('[ModelRouter] Erro no stream:', error.message);
+      return {
+        success: false,
+        text: `[Erro de Stream AI] ${error.message}`,
+        model: routedModel.label,
+        usage: this.buildUsageSummary(routedModel, 0, 0, prompt, ''),
+      };
+    }
+  }
+
+  static async streamOpenAICompatible(url, apiKey, modelName, prompt, systemPrompt, maxTokens = 1800, temperature = 0.2, onToken) {
+    if (!apiKey) throw new Error(`API Key faltando para streaming (${modelName})`);
+
+    const body = {
+      model: modelName,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: prompt },
+      ],
+      temperature: temperature ?? 0.2,
+      stream: true,
+      stream_options: { include_usage: true },
+    };
+    if (modelName.startsWith('gpt-5')) {
+      body.max_completion_tokens = maxTokens ?? 1800;
+    } else {
+      body.max_tokens = maxTokens ?? 1800;
+      delete body.stream_options;
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`API Error (stream): ${err}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = '';
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const raw = trimmed.slice(5).trim();
+        if (raw === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(raw);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) {
+            fullText += delta;
+            if (typeof onToken === 'function') await onToken(delta);
+          }
+          if (parsed.usage) {
+            inputTokens = parsed.usage.prompt_tokens || 0;
+            outputTokens = parsed.usage.completion_tokens || 0;
+          }
+        } catch {}
+      }
+    }
+
+    const routedModel = this.resolveModelLabel(modelName);
+    return {
+      success: true,
+      text: fullText,
+      model: routedModel.label,
+      usage: this.buildUsageSummary(routedModel, inputTokens, outputTokens, prompt, fullText),
+    };
+  }
+
+  static async streamAnthropic(apiKey, modelName, prompt, systemPrompt, maxTokens = 2200, temperature = 0.2, onToken) {
+    if (!apiKey) throw new Error('API Key faltando para Anthropic (stream)');
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: modelName,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: maxTokens ?? 2200,
+        temperature: temperature ?? 0.2,
+        stream: true,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`API Error (Anthropic stream): ${err}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = '';
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const raw = trimmed.slice(5).trim();
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed.type === 'content_block_delta' && parsed.delta?.type === 'text_delta') {
+            const delta = parsed.delta.text || '';
+            if (delta) {
+              fullText += delta;
+              if (typeof onToken === 'function') await onToken(delta);
+            }
+          }
+          if (parsed.type === 'message_delta' && parsed.usage) {
+            outputTokens = parsed.usage.output_tokens || 0;
+          }
+          if (parsed.type === 'message_start' && parsed.message?.usage) {
+            inputTokens = parsed.message.usage.input_tokens || 0;
+          }
+        } catch {}
+      }
+    }
+
+    const routedModel = this.resolveModelLabel(modelName);
+    return {
+      success: true,
+      text: fullText,
+      model: 'Claude 3.5',
+      usage: this.buildUsageSummary(routedModel, inputTokens, outputTokens, prompt, fullText),
+    };
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────────
+
   static async callOpenAICompatible(url, apiKey, modelName, prompt, systemPrompt, maxTokens = 1800, temperature = 0.2) {
     if (!apiKey) throw new Error(`API Key faltando para ${modelName}`);
 
