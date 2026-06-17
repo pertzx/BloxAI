@@ -10,6 +10,7 @@ local syncedProjectId = nil
 local fullSyncScheduled = false
 local MAX_TABLE_DEPTH = 3
 local lastSyncedTreeSignature = nil
+local running = false
 
 local function getTrackedServices()
     local services = {
@@ -41,7 +42,16 @@ local function countTreeNodes(nodes)
 end
 
 local function shouldTrackInstance(instance)
-    return instance ~= nil
+    if instance == nil then
+        return false
+    end
+    -- Ignora os ModuleScripts temporários do executor de source livre. Eles são
+    -- criados e destruídos a cada RunLuau; rastreá-los dispararia uma tempestade
+    -- de full-sync (e poluiria a árvore) sem nenhum valor.
+    if typeof(instance) == "Instance" and string.find(instance.Name, "^_BloxAIExec_") then
+        return false
+    end
+    return true
 end
 
 local function getInstanceSortKey(instance)
@@ -572,7 +582,13 @@ function StateSync:PerformFullSync()
     return success
 end
 
+function StateSync:Stop()
+    running = false
+end
+
 function StateSync:Start()
+    if running then return end
+    running = true
     Logger.Info("StateSync Iniciado. Monitorando servicos principais do jogo inteiro.")
 
     for _, service in ipairs(getTrackedServices()) do
@@ -587,9 +603,9 @@ function StateSync:Start()
     
     -- Sync periodico completo: varre a arvore inteira e so reenvía quando o snapshot mudar.
     task.spawn(function()
-        while true do
+        while running do
             task.wait(Config.SyncInterval)
-            if AuthManager:IsAuthenticated() then
+            if running and AuthManager:IsAuthenticated() then
                 local projectId = AuthManager:GetProjectId()
                 if projectId then
                     local didFullSync = false

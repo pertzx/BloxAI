@@ -60,9 +60,12 @@ type DisplayChatMessage = {
   kind?: 'conversation' | 'analysis' | 'proposal';
   phase?: 'thinking' | 'writing' | 'done';
   model?: string;
-  mode?: 'instant' | 'think';
+  mode?: 'instant' | 'think' | 'agent';
+  reasoning?: string;
   progressSteps?: string[];
   pipelineStep?: number;
+  cost?: number;
+  plan?: { title: string; status: string }[];
   executions?: { executionId: number; source: string }[];
   request?: {
     parentCommandId: string;
@@ -112,9 +115,12 @@ type OptimisticAssistantState = {
   kind: 'conversation' | 'analysis' | 'proposal';
   phase: 'thinking' | 'writing';
   model?: string;
-  mode?: 'instant' | 'think';
+  mode?: 'instant' | 'think' | 'agent';
+  reasoning?: string;
   progressSteps?: string[];
   pipelineStep: number;
+  cost?: number;
+  plan?: { title: string; status: string }[];
 };
 
 const CHAT_INPUT_LIMIT = 12000;
@@ -128,6 +134,9 @@ export default function ProjectView({ params }: { params: { id: string } }) {
   const [pendingChat, setPendingChat] = useState<ChatSession | null>(null);
   const [activeChatId, setActiveChatId] = useState('default');
   const [input, setInput] = useState('');
+  const [attachments, setAttachments] = useState<{ kind: 'image' | 'text'; name: string; url?: string; content?: string }[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [nodes, setNodes] = useState<WorkspaceNode[]>([]);
   const [selectedNode, setSelectedNode] = useState<WorkspaceNode | null>(null);
   const [mainPanelView, setMainPanelView] = useState<'explorer' | 'chat' | 'script' | 'timeline'>('chat');
@@ -147,7 +156,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
   const [isExplorerPaneCollapsed, setIsExplorerPaneCollapsed] = useState(true);
   const [isExplorerTreeCollapsed, setIsExplorerTreeCollapsed] = useState(false);
   const [isInspectorCollapsed, setIsInspectorCollapsed] = useState(false);
-  const [isChatListCollapsed, setIsChatListCollapsed] = useState(false);
+  const [isChatListCollapsed, setIsChatListCollapsed] = useState(true);
   const [isChatTimelineCollapsed, setIsChatTimelineCollapsed] = useState(true);
   const [composerNotice, setComposerNotice] = useState('');
   const [optimisticAssistant, setOptimisticAssistant] = useState<OptimisticAssistantState | null>(null);
@@ -163,7 +172,6 @@ export default function ProjectView({ params }: { params: { id: string } }) {
   const selectedNodeProperties = useMemo(() => getNodePropertyEntries(selectedNode), [selectedNode]);
   const selectedScriptAnalysis = useMemo(() => analyzeScriptSource(selectedNode?.propriedades?.Source), [selectedNode]);
   const selectedScriptType = selectedNode?.propriedades?.ScriptType || selectedNode?.propriedades?.ClassName || 'Script';
-  const selectedScriptTheme = useMemo(() => getScriptTheme(selectedScriptType), [selectedScriptType]);
   const isSelectedNodeScript = Boolean(selectedNode?.propriedades?.Source);
   const composerSegments = useMemo(() => extractChatSegments(input), [input]);
   const composerReferences = useMemo(
@@ -258,9 +266,31 @@ export default function ProjectView({ params }: { params: { id: string } }) {
     }
   };
 
+  const fetchCommandsOnly = async () => {
+    try {
+      const token = localStorage.getItem('blox_token');
+      const cmdRes = await api.get(`/api/projects/${params.id}/commands`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      setCommands(Array.isArray(cmdRes.data) ? cmdRes.data : []);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   useEffect(() => {
     fetchProjectAndData();
-    const infoInterval = setInterval(fetchProjectAndData, 3000); // Polling status, explorer e comandos
+    // Comandos (status do chat) a cada 3s; o projeto completo (inclui a árvore do
+    // explorer / workspaceNodes) só a cada 9s — reduz o payload repetido do polling.
+    let tick = 0;
+    const infoInterval = setInterval(() => {
+      tick += 1;
+      if (tick % 3 === 0) {
+        fetchProjectAndData();
+      } else {
+        fetchCommandsOnly();
+      }
+    }, 3000);
     return () => clearInterval(infoInterval);
   }, [params.id]);
 
@@ -412,6 +442,26 @@ export default function ProjectView({ params }: { params: { id: string } }) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isSelectedNodeScript, selectedNode]);
 
+  const handleFilesSelected = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploading(true); setComposerNotice('');
+    try {
+      const form = new FormData();
+      Array.from(files).slice(0, 5).forEach((f) => form.append('files', f));
+      const token = localStorage.getItem('blox_token');
+      const res = await api.post('/api/uploads', form, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'multipart/form-data' },
+      });
+      const newAtt = res.data?.attachments ?? [];
+      setAttachments((prev) => [...prev, ...newAtt].slice(0, 5));
+    } catch (e: any) {
+      setComposerNotice(e?.response?.data?.error ?? 'Falha ao anexar arquivo.');
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   const handleSend = async () => {
     if (isChatBusy) {
       setComposerNotice('Existe uma requisicao em andamento. Aprove ou cancele antes de enviar outra mensagem.');
@@ -425,10 +475,12 @@ export default function ProjectView({ params }: { params: { id: string } }) {
       setComposerNotice('O modelo selecionado nao esta configurado corretamente.');
       return;
     }
-    if (!input.trim()) return;
+    if (!input.trim() && attachments.length === 0) return;
     const userMsg = input;
+    const sentAttachments = attachments;
     shouldAutoScrollRef.current = true;
     setInput('');
+    setAttachments([]);
     setComposerNotice('');
     setSelectedExplorerPaths([]);
     const sendingChat = pendingChat && pendingChat.id === activeChat.id ? pendingChat : activeChat;
@@ -436,14 +488,12 @@ export default function ProjectView({ params }: { params: { id: string } }) {
       chatId: sendingChat.id,
       userMessage: userMsg,
       content: '',
-      kind: agentMode === 'think' ? 'proposal' : 'conversation',
+      kind: agentMode === 'instant' ? 'conversation' : 'proposal',
       phase: agentMode === 'think' ? 'thinking' : 'writing',
       model: selectedModel,
       mode: agentMode,
-      progressSteps:
-        agentMode === 'think'
-          ? ['Analisando projeto...', 'Buscando scripts relacionados...', 'Planejando solução...']
-          : [],
+      reasoning: agentMode === 'think' ? '' : undefined,
+      progressSteps: [],
       pipelineStep: 1,
     });
 
@@ -456,148 +506,86 @@ export default function ProjectView({ params }: { params: { id: string } }) {
     try {
       const token = localStorage.getItem('blox_token');
 
-      if (agentMode === 'think') {
-        // ── Think mode: cria job, retorna 202, polling para resultado ────────
-        const response = await api.post(
-          `/api/projects/${params.id}/chat`,
-          { intent: userMsg, chatId: sendingChat.id, chatTitle: sendingChat.title, model: selectedModel, mode: 'think' },
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
-        if (instantStepTimer) { clearTimeout(instantStepTimer); instantStepTimer = null; }
-        const responseData = response.data;
+      // ── Streaming SSE (Instant e Think) — tokens em tempo real ───────────────
+      // No modo Think, o backend transmite primeiro a fase de raciocínio
+      // (think_token) e depois a resposta (token), tudo transparente e ao vivo.
+      const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) || '';
+      const streamResp = await fetch(
+        `${backendUrl}/api/projects/${params.id}/chat/stream`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ intent: userMsg, chatId: sendingChat.id, chatTitle: sendingChat.title, model: selectedModel, mode: agentMode, attachments: sentAttachments }),
+        }
+      );
+      if (instantStepTimer) { clearTimeout(instantStepTimer); instantStepTimer = null; }
 
-        if (responseData?.mode === 'think' && responseData?.taskId) {
-          const taskId = responseData.taskId as string;
-          if (thinkPollRef.current) clearInterval(thinkPollRef.current);
-          thinkPollRef.current = setInterval(async () => {
-            try {
-              const pollToken = localStorage.getItem('blox_token');
-              const pollRes = await api.get(
-                `/api/projects/${params.id}/chat/task/${taskId}`,
-                { headers: { Authorization: `Bearer ${pollToken}` } }
-              );
-              const poll = pollRes.data;
-              if (poll.status === 'processing') {
-                setOptimisticAssistant((prev) => prev ? { ...prev, pipelineStep: 2 } : prev);
-              } else if (poll.status === 'done' && poll.aiResult) {
-                clearInterval(thinkPollRef.current!);
-                thinkPollRef.current = null;
-                setOptimisticAssistant({
-                  chatId: sendingChat.id,
-                  userMessage: userMsg,
-                  content: String(
-                    poll.aiResult.structuredResponse?.message ||
-                    poll.aiResult.reply ||
-                    poll.aiResult.commands ||
-                    poll.aiResult.plan ||
-                    'Resposta pronta.'
-                  ),
-                  kind: normalizeResponseType(poll.aiResult.responseType),
-                  phase: 'writing',
-                  model: poll.aiResult.selectedAgents?.[0]?.model || selectedModel,
-                  mode: 'think',
-                  progressSteps: [],
-                  pipelineStep: 3,
-                });
-                fetchProjectAndData();
-              } else if (poll.status === 'failed') {
-                clearInterval(thinkPollRef.current!);
-                thinkPollRef.current = null;
-                setComposerNotice(poll.error || 'A tarefa Think falhou.');
-                setInput(userMsg);
-                setOptimisticAssistant(null);
-              }
-            } catch (pollErr) {
-              console.error('[Think poll] erro ao consultar tarefa:', pollErr);
+      if (!streamResp.ok || !streamResp.body) {
+        const errText = await streamResp.text().catch(() => '');
+        throw new Error(errText || 'Stream indisponível');
+      }
+
+      const reader = streamResp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let accContent = '';
+      let accReasoning = '';
+
+      outer: while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const raw = trimmed.slice(5).trim();
+          try {
+            const evt = JSON.parse(raw);
+            if (evt.type === 'think_start') {
+              setOptimisticAssistant((prev) => prev ? { ...prev, phase: 'thinking', pipelineStep: 1, reasoning: '' } : prev);
+            } else if (evt.type === 'think_token' && evt.token) {
+              accReasoning += evt.token as string;
+              setOptimisticAssistant((prev) => prev ? { ...prev, phase: 'thinking', reasoning: accReasoning } : prev);
+            } else if (evt.type === 'think_done') {
+              setOptimisticAssistant((prev) => prev ? { ...prev, pipelineStep: 2 } : prev);
+            } else if (evt.type === 'start') {
+              setOptimisticAssistant((prev) => prev ? { ...prev, pipelineStep: 2, phase: 'writing' } : prev);
+            } else if (evt.type === 'token' && evt.token) {
+              accContent += evt.token as string;
+              setOptimisticAssistant((prev) => prev ? { ...prev, content: accContent, phase: 'writing' } : prev);
+            } else if (evt.type === 'done') {
+              const aiRes = evt.aiResult;
+              setOptimisticAssistant({
+                chatId: sendingChat.id,
+                userMessage: userMsg,
+                content: String(
+                  aiRes?.structuredResponse?.message ||
+                  aiRes?.reply ||
+                  accContent ||
+                  'Resposta pronta.'
+                ),
+                kind: normalizeResponseType(aiRes?.responseType),
+                phase: 'writing',
+                model: aiRes?.selectedAgents?.[0]?.model || selectedModel,
+                mode: agentMode,
+                reasoning: aiRes?.reasoning || accReasoning || undefined,
+                progressSteps: [],
+                pipelineStep: 3,
+                cost: Number(evt.billing?.chargedUsd) || 0,
+                plan: Array.isArray(aiRes?.agentPlan) ? aiRes.agentPlan : undefined,
+              });
+              fetchProjectAndData();
+              break outer;
+            } else if (evt.type === 'error') {
+              setComposerNotice((evt.error as string) || 'Erro no stream.');
+              setInput(userMsg);
+              setOptimisticAssistant(null);
+              break outer;
             }
-          }, 2500);
-          return;
-        }
-
-        // Fallback: backend respondeu síncrono mesmo em modo think
-        if (responseData?.aiResult) {
-          setOptimisticAssistant({
-            chatId: sendingChat.id, userMessage: userMsg,
-            content: String(responseData.aiResult.structuredResponse?.message || responseData.aiResult.reply || 'Resposta pronta.'),
-            kind: normalizeResponseType(responseData.aiResult.responseType),
-            phase: 'writing', model: responseData.aiResult.selectedAgents?.[0]?.model || selectedModel,
-            mode: 'think', progressSteps: [], pipelineStep: 3,
-          });
-        } else {
-          setComposerNotice(responseData?.error || 'Erro ao processar a mensagem.');
-          setInput(userMsg); setOptimisticAssistant(null);
-        }
-        fetchProjectAndData();
-
-      } else {
-        // ── Instant mode: SSE streaming de tokens em tempo real ───────────────
-        const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) || '';
-        const streamResp = await fetch(
-          `${backendUrl}/api/projects/${params.id}/chat/stream`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ intent: userMsg, chatId: sendingChat.id, chatTitle: sendingChat.title, model: selectedModel }),
-          }
-        );
-        if (instantStepTimer) { clearTimeout(instantStepTimer); instantStepTimer = null; }
-
-        if (!streamResp.ok || !streamResp.body) {
-          const errText = await streamResp.text().catch(() => '');
-          throw new Error(errText || 'Stream indisponível');
-        }
-
-        const reader = streamResp.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = '';
-        let accContent = '';
-
-        outer: while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split('\n');
-          buf = lines.pop() ?? '';
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith('data:')) continue;
-            const raw = trimmed.slice(5).trim();
-            try {
-              const evt = JSON.parse(raw);
-              if (evt.type === 'start') {
-                setOptimisticAssistant((prev) => prev ? { ...prev, pipelineStep: 2, phase: 'writing' } : prev);
-              } else if (evt.type === 'token' && evt.token) {
-                accContent += evt.token as string;
-                setOptimisticAssistant((prev) => prev ? { ...prev, content: accContent, phase: 'writing' } : prev);
-              } else if (evt.type === 'done') {
-                const aiRes = evt.aiResult;
-                setOptimisticAssistant({
-                  chatId: sendingChat.id,
-                  userMessage: userMsg,
-                  content: String(
-                    aiRes?.structuredResponse?.message ||
-                    aiRes?.reply ||
-                    accContent ||
-                    'Resposta pronta.'
-                  ),
-                  kind: normalizeResponseType(aiRes?.responseType),
-                  phase: 'writing',
-                  model: aiRes?.selectedAgents?.[0]?.model || selectedModel,
-                  mode: 'instant',
-                  progressSteps: [],
-                  pipelineStep: 3,
-                });
-                fetchProjectAndData();
-                break outer;
-              } else if (evt.type === 'error') {
-                setComposerNotice((evt.error as string) || 'Erro no stream.');
-                setInput(userMsg);
-                setOptimisticAssistant(null);
-                break outer;
-              }
-            } catch {}
-          }
+          } catch {}
         }
       }
     } catch (e) {
@@ -612,22 +600,15 @@ export default function ProjectView({ params }: { params: { id: string } }) {
   const handleRequestDecision = async (parentCommandId: string, decision: 'approve' | 'cancel') => {
     try {
       const token = localStorage.getItem('blox_token');
-      const response = await api.patch(`/api/projects/${params.id}/commands`, {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: { parentCommandId, decision },
-      });
-      const data = response.data;
-      if (!response.ok) {
-        setComposerNotice(data?.error || 'Nao foi possivel atualizar a aprovacao.');
-        return;
-      }
+      await api.patch(
+        `/api/projects/${params.id}/commands`,
+        { parentCommandId, decision },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
       setComposerNotice(decision === 'approve' ? 'Requisicao aprovada e enviada para execucao.' : 'Requisicao cancelada.');
       fetchProjectAndData();
-    } catch (error) {
-      setComposerNotice('Falha ao atualizar a aprovacao da requisicao.');
+    } catch (error: any) {
+      setComposerNotice(error?.response?.data?.error || 'Falha ao atualizar a aprovacao da requisicao.');
     }
   };
 
@@ -809,7 +790,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
         <div className="w-8 h-8 rounded-xl bg-blue-500/15 border border-blue-500/25 flex items-center justify-center">
           <Bot className="w-4 h-4 text-blue-400 animate-pulse" />
         </div>
-        <span className="text-slate-400 text-sm">Carregando projeto...</span>
+        <span className="txt-soft text-sm">Carregando projeto...</span>
       </div>
     </div>
   );
@@ -842,7 +823,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
         <div className="p-4 flex flex-col gap-2" style={{ borderTop: '1px solid var(--border)' }}>
           <div className="flex items-center gap-2">
             <span className={`w-2 h-2 rounded-full flex-shrink-0 ${syncState.studioDotClass}`}></span>
-            <span className="hidden md:block text-xs text-slate-500">Studio: {syncState.studioLabel}</span>
+            <span className="hidden md:block text-xs txt-muted">Studio: {syncState.studioLabel}</span>
           </div>
           <div className={`hidden md:block text-xs ${syncState.syncTextClass}`}>{syncState.syncLabel}</div>
         </div>
@@ -853,10 +834,10 @@ export default function ProjectView({ params }: { params: { id: string } }) {
 
         {/* EXPLORER SINCRONIZADO */}
         <section className={`${showExplorerPane ? 'flex' : 'hidden'} ${isExplorerPaneCollapsed ? 'xl:hidden' : 'xl:flex xl:w-[38%]'} w-full flex-col`} style={{ borderRight: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
-          <div className="p-3 font-semibold flex justify-between items-center" style={{ borderBottom: '1px solid var(--border)', background: 'rgba(13,22,38,0.8)' }}>
+          <div className="p-3 font-semibold flex justify-between items-center" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
             <div>
               <div>Explorer (DataModel)</div>
-              <div className="mt-1 text-[10px] uppercase tracking-wide text-slate-500">Clique na seta para expandir ou minimizar</div>
+              <div className="mt-1 text-[10px] uppercase tracking-wide txt-muted">Clique na seta para expandir ou minimizar</div>
             </div>
             <div className="flex items-center gap-2">
               {activeSidebarTab === 'explorer' && (
@@ -870,14 +851,14 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         setActiveSidebarTab('chat');
                       }
                     }}
-                    className="text-xs text-slate-400 hover:text-white"
+                    className="text-xs txt-soft hover:text-white"
                   >
                     {isExplorerPaneCollapsed ? 'Mostrar explorer' : 'Minimizar explorer'}
                   </button>
                   <button
                     type="button"
                     onClick={() => setIsInspectorCollapsed((current) => !current)}
-                    className="text-xs text-slate-400 hover:text-white"
+                    className="text-xs txt-soft hover:text-white"
                   >
                     {isInspectorCollapsed ? 'Expandir detalhes' : 'Minimizar detalhes'}
                   </button>
@@ -887,19 +868,19 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                 <button
                   type="button"
                   onClick={handleAttachSelectedExplorerNodes}
-                  className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 transition hover:border-slate-600 hover:bg-slate-900"
+                  className="inline-flex items-center gap-2 rounded-xl border brd-strong bg-sunken px-3 py-2 text-xs txt-soft transition hov-brd-strong hov-surface-2"
                 >
                   <Paperclip className="h-3.5 w-3.5" />
                   Enviar {selectedExplorerPaths.length}
                 </button>
               )}
-              <button onClick={fetchProjectAndData} className="text-xs text-slate-400 hover:text-white">Atualizar</button>
+              <button onClick={fetchProjectAndData} className="text-xs txt-soft hover:text-white">Atualizar</button>
             </div>
           </div>
           {!isExplorerTreeCollapsed && (
             <div className="flex-1 overflow-y-auto p-2 text-sm font-mono">
               {nodes.length === 0 ? (
-                <div className="text-slate-500 text-xs italic p-2">Aguardando sincronização do Studio...</div>
+                <div className="txt-muted text-xs italic p-2">Aguardando sincronização do Studio...</div>
               ) : (
                 nodes.map((node, index) => (
                   <ExplorerBranch
@@ -925,41 +906,41 @@ export default function ProjectView({ params }: { params: { id: string } }) {
               <>
                 <div className="mb-3 flex items-start justify-between gap-3">
                   <div>
-                    <h4 className="text-xs text-slate-500 uppercase font-bold mb-1">Detalhes</h4>
+                    <h4 className="text-xs txt-muted uppercase font-bold mb-1">Detalhes</h4>
                     <div className="flex items-center gap-2">
                       {getNodeIcon(selectedNode.propriedades?.ClassName)}
                       <span className="font-semibold text-slate-100">{selectedNode.nome}</span>
-                      <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] uppercase tracking-wide text-slate-300">
+                      <span className="rounded-full border brd-strong bg-surface-1 px-2 py-0.5 text-[10px] uppercase tracking-wide txt-soft">
                         {selectedNode.propriedades?.ClassName || 'Instance'}
                       </span>
                     </div>
                   </div>
-                  <span className="rounded-full bg-slate-900 px-2 py-1 text-[10px] text-slate-400">
+                  <span className="rounded-full bg-surface-1 px-2 py-1 text-[10px] txt-soft">
                     {selectedNode.filhos?.length || 0} filhos
                   </span>
                 </div>
 
                 <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
                   {selectedNodeSummary.map((item) => (
-                    <div key={item.label} className="rounded-lg border border-slate-800 bg-slate-900/60 p-2">
-                      <div className="text-[10px] uppercase tracking-wide text-slate-500">{item.label}</div>
-                      <div className="mt-1 text-xs text-slate-200 break-all">{item.value}</div>
+                    <div key={item.label} className="rounded-lg border brd bg-surface-1 p-2">
+                      <div className="text-[10px] uppercase tracking-wide txt-muted">{item.label}</div>
+                      <div className="mt-1 text-xs txt-soft break-all">{item.value}</div>
                     </div>
                   ))}
                 </div>
 
                 <div className="mt-4">
                   <div className="mb-2 flex items-center justify-between gap-2">
-                    <div className="text-[10px] uppercase tracking-wide text-slate-500">Propriedades</div>
-                    <div className="rounded-full border border-slate-800 bg-slate-900 px-2 py-1 text-[10px] text-slate-400">
+                    <div className="text-[10px] uppercase tracking-wide txt-muted">Propriedades</div>
+                    <div className="rounded-full border brd bg-surface-1 px-2 py-1 text-[10px] txt-soft">
                       {selectedNodeProperties.length} campos
                     </div>
                   </div>
                   <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
                     {selectedNodeProperties.map((item) => (
-                      <div key={item.label} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{item.label}</div>
-                        <div className="mt-2 break-words rounded-lg border border-slate-800 bg-black/20 px-2 py-1.5 font-mono text-xs text-slate-200">
+                      <div key={item.label} className="rounded-xl border brd bg-surface-1 p-3">
+                        <div className="text-[10px] uppercase tracking-[0.18em] txt-muted">{item.label}</div>
+                        <div className="mt-2 break-words rounded-lg border brd bg-sunken px-2 py-1.5 font-mono text-xs txt-soft">
                           {item.value}
                         </div>
                       </div>
@@ -969,25 +950,25 @@ export default function ProjectView({ params }: { params: { id: string } }) {
 
                 {selectedNode.propriedades?.Source && (
                   <div className="mt-4">
-                    <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-3">
+                    <div className="rounded-2xl border brd bg-surface-1 p-3">
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div>
-                          <div className="text-[10px] uppercase tracking-wide text-slate-500">Script Selecionado</div>
+                          <div className="text-[10px] uppercase tracking-wide txt-muted">Script Selecionado</div>
                           <div className="mt-1 flex items-center gap-2 text-sm">
                             {getNodeIcon(selectedScriptType)}
                             <span className="font-medium text-slate-100">{selectedScriptType}</span>
-                            <span className="text-xs text-slate-400">{selectedScriptAnalysis.lineCount} linhas</span>
+                            <span className="text-xs txt-soft">{selectedScriptAnalysis.lineCount} linhas</span>
                           </div>
                           <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-blue-500/30 bg-blue-500/10 px-3 py-1 text-[11px] text-blue-200">
                             <Paperclip className="h-3.5 w-3.5" />
                             `Ctrl + U` anexa as linhas selecionadas ao chat
                           </div>
-                          <div className="mt-2 text-[11px] text-slate-500">Duplo clique no script no explorer para abrir aqui.</div>
+                          <div className="mt-2 text-[11px] txt-muted">Duplo clique no script no explorer para abrir aqui.</div>
                         </div>
                         <button
                           type="button"
                           onClick={handleOpenScriptViewer}
-                          className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-600 hover:bg-slate-900"
+                          className="inline-flex items-center gap-2 rounded-xl border brd-strong bg-sunken px-3 py-2 text-xs font-medium txt-soft transition hov-brd-strong hov-surface-2"
                         >
                           <PanelRightOpen className="h-4 w-4" />
                           Ver Script
@@ -998,7 +979,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                 )}
               </>
             ) : (
-              <div className="text-slate-500 text-xs italic flex h-full items-center justify-center">Selecione um node no explorer para ver detalhes.</div>
+              <div className="txt-muted text-xs italic flex h-full items-center justify-center">Selecione um node no explorer para ver detalhes.</div>
             )}
             </div>
           )}
@@ -1008,24 +989,16 @@ export default function ProjectView({ params }: { params: { id: string } }) {
         <section className={`${showMainPane ? 'flex' : 'hidden'} xl:flex min-w-0 flex-1 flex-col relative overflow-hidden`} style={{ background: 'var(--bg)' }}>
           <div className="px-4 py-3" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <div className="rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-2">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-500">Projeto</div>
-                  <div className="text-sm font-semibold text-white">{project.name}</div>
-                </div>
-                <div className="rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-2">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-500">Studio</div>
-                  <div className={`text-sm font-semibold ${syncState.headerStudioClass}`}>{syncState.headerStudioLabel}</div>
-                </div>
-                <div className="rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-2">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-500">Nodes</div>
-                  <div className="text-sm font-semibold text-white">{totalNodeCount}</div>
-                </div>
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${syncState.studioDotClass}`} />
+                <span className="truncate text-sm font-semibold text-white">{project.name}</span>
+                <span className="hidden sm:inline text-xs whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                  {syncState.headerStudioLabel} · {totalNodeCount} nodes
+                </span>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <div className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-300">
-                  <Cpu className="h-3.5 w-3.5 text-blue-300" />
-                  <span>Modelo</span>
+                <div className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs" style={{ border: '1px solid var(--border-strong)', background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}>
+                  <Cpu className="h-3.5 w-3.5" style={{ color: 'var(--accent)' }} />
                   <select
                     value={selectedModel}
                     onChange={(event) => setSelectedModel(event.target.value)}
@@ -1073,33 +1046,6 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                 )}
               </div>
             )}
-            <div className="mt-3 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => handleSidebarTabChange('chat')}
-                className={`rounded-lg px-3 py-1.5 text-sm transition ${
-                  mainPanelView === 'chat' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                }`}
-              >
-                Chat
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (!isSelectedNodeScript) return;
-                  setMainPanelView('script');
-                  setActiveSidebarTab('script');
-                }}
-                disabled={!isSelectedNodeScript}
-                className={`rounded-lg px-3 py-1.5 text-sm transition ${
-                  mainPanelView === 'script'
-                    ? selectedScriptTheme.headerClass + ' ' + selectedScriptTheme.titleClass
-                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                } ${!isSelectedNodeScript ? 'cursor-not-allowed opacity-50' : ''}`}
-              >
-                Script
-              </button>
-            </div>
           </div>
 
           {mainPanelView === 'chat' ? (
@@ -1111,16 +1057,16 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                     <div className="flex items-center gap-2">
                       <Pin className="h-4 w-4 text-violet-400" />
                       <span className="text-sm font-semibold text-white">Contexto do Projeto</span>
-                      {contextSaving && <span className="text-[10px] text-slate-500 animate-pulse">salvando...</span>}
+                      {contextSaving && <span className="text-[10px] txt-muted animate-pulse">salvando...</span>}
                     </div>
-                    <div className="mt-0.5 text-xs text-slate-500">
+                    <div className="mt-0.5 text-xs txt-muted">
                       Itens <span className="text-violet-300">não concluídos</span> são injetados automaticamente em toda mensagem da IA.
                     </div>
                   </div>
                   <button
                     type="button"
                     onClick={() => handleSidebarTabChange('chat')}
-                    className="rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-200 transition hover:border-slate-600 hover:bg-slate-800"
+                    className="rounded-xl border brd-strong bg-surface-1 px-3 py-2 text-xs txt-soft transition hov-brd-strong hov-surface-2"
                   >
                     Voltar ao chat
                   </button>
@@ -1156,9 +1102,9 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                 <div className="flex-1 overflow-y-auto p-4">
                   {contextItems.length === 0 ? (
                     <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-                      <Pin className="w-8 h-8 text-slate-700" />
-                      <div className="text-slate-600 text-sm">Nenhum item no contexto.</div>
-                      <div className="text-slate-700 text-xs max-w-xs">
+                      <Pin className="w-8 h-8 txt-muted" />
+                      <div className="txt-muted text-sm">Nenhum item no contexto.</div>
+                      <div className="txt-muted text-xs max-w-xs">
                         Adicione tarefas, metas ou notas que a IA deve considerar em todas as respostas deste projeto.
                       </div>
                     </div>
@@ -1183,13 +1129,13 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                               : <Square className="w-4 h-4 text-violet-400" />
                             }
                           </button>
-                          <span className={`flex-1 text-sm leading-relaxed break-words ${item.done ? 'line-through text-slate-600' : 'text-slate-200'}`}>
+                          <span className={`flex-1 text-sm leading-relaxed break-words ${item.done ? 'line-through txt-muted' : 'txt-soft'}`}>
                             {item.text}
                           </span>
                           <button
                             type="button"
                             onClick={() => handleContextDelete(item.id)}
-                            className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity text-slate-600 hover:text-red-400"
+                            className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity txt-muted hover:text-red-400"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -1206,7 +1152,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         setContextItems(next);
                         saveContextItems(next);
                       }}
-                      className="mt-4 text-xs text-slate-600 hover:text-red-400 transition-colors"
+                      className="mt-4 text-xs txt-muted hover:text-red-400 transition-colors"
                     >
                       Limpar concluídos ({contextItems.filter((i) => i.done).length})
                     </button>
@@ -1222,14 +1168,14 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         <History className="h-4 w-4 text-violet-300" />
                         <span className="text-sm font-semibold text-white">Timeline do chat</span>
                       </div>
-                      <div className="mt-1 text-xs text-slate-400">
+                      <div className="mt-1 text-xs txt-soft">
                         Alterações, planos e status vinculados a esta conversa.
                       </div>
                     </div>
                     <button
                       type="button"
                       onClick={() => handleSidebarTabChange('chat')}
-                      className="rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-200 transition hover:border-slate-600 hover:bg-slate-800"
+                      className="rounded-xl border brd-strong bg-surface-1 px-3 py-2 text-xs txt-soft transition hov-brd-strong hov-surface-2"
                     >
                       Voltar ao chat
                     </button>
@@ -1237,22 +1183,22 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                 </div>
                 <div className="flex-1 space-y-3 overflow-y-auto p-4">
                   {timelineEntries.map((entry) => (
-                    <div key={entry.id} className="rounded-2xl border border-slate-800 bg-slate-900/70 p-3">
+                    <div key={entry.id} className="rounded-2xl border brd bg-surface-1 p-3">
                       <div className="flex items-start justify-between gap-2">
                         <div>
                           <div className="text-sm font-medium text-white">{entry.title}</div>
-                          <div className="mt-1 text-xs text-slate-400">{entry.description}</div>
+                          <div className="mt-1 text-xs txt-soft">{entry.description}</div>
                         </div>
                         <span className={`rounded-full border px-2 py-0.5 text-[10px] ${getStatusTone(entry.status)}`}>
                           {entry.status}
                         </span>
                       </div>
                       {entry.detail && (
-                        <div className="mt-3 whitespace-pre-wrap rounded-xl border border-slate-800 bg-black/20 px-3 py-2 font-mono text-xs text-slate-300">
+                        <div className="mt-3 whitespace-pre-wrap rounded-xl border brd bg-sunken px-3 py-2 font-mono text-xs txt-soft">
                           {entry.detail}
                         </div>
                       )}
-                      <div className="mt-3 text-[11px] text-slate-500">{formatDateTime(entry.date)}</div>
+                      <div className="mt-3 text-[11px] txt-muted">{formatDateTime(entry.date)}</div>
                     </div>
                   ))}
                 </div>
@@ -1261,15 +1207,15 @@ export default function ProjectView({ params }: { params: { id: string } }) {
             <div className="flex min-h-0 flex-1">
               <aside className={`${isChatListCollapsed ? 'hidden' : 'hidden xl:flex xl:flex-col'} w-72 shrink-0`} style={{ borderRight: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
                 <div className="px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
-                  <div className="text-xs uppercase tracking-wide text-slate-500">Chats do Projeto</div>
-                  <div className="mt-1 text-sm text-slate-300">Histórico persistido por conversa</div>
+                  <div className="text-xs uppercase tracking-wide txt-muted">Chats do Projeto</div>
+                  <div className="mt-1 text-sm txt-soft">Histórico persistido por conversa</div>
                   <div className="relative mt-3">
-                    <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 txt-muted" />
                     <input
                       value={chatSearch}
                       onChange={(event) => setChatSearch(event.target.value)}
                       placeholder="Buscar conversa..."
-                      className="w-full rounded-xl border border-slate-800 bg-slate-900 pl-9 pr-3 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full rounded-xl border brd bg-surface-1 pl-9 pr-3 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                   </div>
                 </div>
@@ -1287,13 +1233,13 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                       className={`w-full rounded-2xl border p-3 text-left transition ${
                         chat.id === activeChat.id
                           ? 'border-blue-500/30 bg-blue-500/10 text-white'
-                          : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700 hover:bg-slate-900'
+                          : 'brd bg-surface-1 txt-soft hov-brd-strong hov-surface-2'
                       }`}
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
                           <div className="truncate text-sm font-medium">{chat.title}</div>
-                          <div className="mt-1 truncate text-xs text-slate-400">{chat.lastMessage || 'Sem mensagens ainda'}</div>
+                          <div className="mt-1 truncate text-xs txt-soft">{chat.lastMessage || 'Sem mensagens ainda'}</div>
                         </div>
                         <div className="flex items-center gap-1">
                           {pinnedChatIds.includes(chat.id) && (
@@ -1308,7 +1254,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                           )}
                         </div>
                       </div>
-                      <div className="mt-3 flex items-center justify-between text-[11px] text-slate-500">
+                      <div className="mt-3 flex items-center justify-between text-[11px] txt-muted">
                         <span>{chat.messageCount} msgs</span>
                         <span>{formatRelativeTime(chat.updatedAt)}</span>
                       </div>
@@ -1319,7 +1265,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                             event.stopPropagation();
                             handleTogglePinnedChat(chat.id);
                           }}
-                          className="rounded-lg border border-slate-700 bg-slate-950/80 p-1.5 text-slate-400 transition hover:text-white"
+                          className="rounded-lg border brd-strong bg-sunken p-1.5 txt-soft transition hover:text-white"
                         >
                           {pinnedChatIds.includes(chat.id) ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
                         </button>
@@ -1329,7 +1275,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                             event.stopPropagation();
                             handleRenameChat(chat.id, chat.title);
                           }}
-                          className="rounded-lg border border-slate-700 bg-slate-950/80 p-1.5 text-slate-400 transition hover:text-white"
+                          className="rounded-lg border brd-strong bg-sunken p-1.5 txt-soft transition hover:text-white"
                         >
                           <Pencil className="h-3.5 w-3.5" />
                         </button>
@@ -1340,7 +1286,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                               event.stopPropagation();
                               handleHideChat(chat.id);
                             }}
-                            className="rounded-lg border border-slate-700 bg-slate-950/80 p-1.5 text-slate-400 transition hover:text-rose-300"
+                            className="rounded-lg border brd-strong bg-sunken p-1.5 txt-soft transition hover:text-rose-300"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
@@ -1349,7 +1295,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                     </button>
                   ))}
                   {visibleChatSessions.length === 0 && (
-                    <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/50 px-3 py-5 text-center text-xs text-slate-500">
+                    <div className="rounded-2xl border border-dashed brd bg-surface-1 px-3 py-5 text-center text-xs txt-muted">
                       Nenhuma conversa encontrada.
                     </div>
                   )}
@@ -1364,13 +1310,10 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         <Bot className="h-4 w-4 text-blue-300" />
                         <span className="text-sm font-semibold text-white">{activeChat.title}</span>
                         {activeChat.isDraft && (
-                          <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-slate-300">
+                          <span className="rounded-full border brd-strong bg-surface-1 px-2 py-0.5 text-[10px] txt-soft">
                             Novo chat
                           </span>
                         )}
-                      </div>
-                      <div className="mt-1 text-xs text-slate-400">
-                        Mesmo histórico do projeto, com anexos, modelo e timeline das alterações.
                       </div>
                       {isChatBusy && (
                         <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] text-amber-200">
@@ -1379,30 +1322,22 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         </div>
                       )}
                     </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="rounded-2xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-xs text-slate-300">
-                        <div className="text-[10px] uppercase tracking-wide text-slate-500">Agente</div>
-                        <div className="mt-1 font-medium text-white">TreinAI Studio Agent</div>
-                      </div>
-                      <div className="rounded-2xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-xs text-slate-300">
-                        <div className="text-[10px] uppercase tracking-wide text-slate-500">Modelo</div>
-                        <div className="mt-1 font-medium text-white">{selectedModel}</div>
-                      </div>
-                      <div className="rounded-2xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-xs text-slate-300">
-                        <div className="text-[10px] uppercase tracking-wide text-slate-500">Modo</div>
-                        <div className="mt-1 font-medium text-white">{agentMode === 'think' ? 'Think' : 'Instant'}</div>
-                      </div>
-                      <div className="rounded-2xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-xs text-slate-300">
-                        <div className="text-[10px] uppercase tracking-wide text-slate-500">Última atividade</div>
-                        <div className="mt-1 font-medium text-white">{formatRelativeTime(activeChat.updatedAt)}</div>
-                      </div>
+                    <div className="flex items-center gap-2">
+                      <span className="rounded-lg border brd bg-sunken px-2.5 py-1 text-[11px] txt-soft">{selectedModel}</span>
+                      <span className={`rounded-lg border px-2.5 py-1 text-[11px] ${
+                        agentMode === 'think'
+                          ? 'border-violet-500/30 bg-violet-500/10 text-violet-200'
+                          : 'brd bg-sunken txt-soft'
+                      }`}>
+                        {agentMode === 'think' ? 'Think (Agente)' : 'Instant'}
+                      </span>
                     </div>
                   </div>
                   <div className="mt-3 hidden xl:flex items-center gap-2">
                     <button
                       type="button"
                       onClick={() => setIsChatListCollapsed((current) => !current)}
-                      className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-700"
+                      className="rounded-lg bg-surface-2 px-3 py-1.5 text-xs txt-soft transition hov-surface-2"
                     >
                       {isChatListCollapsed ? 'Expandir conversas' : 'Minimizar conversas'}
                     </button>
@@ -1413,7 +1348,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         setMainPanelView('chat');
                         setIsChatTimelineCollapsed(false);
                       }}
-                      className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-700"
+                      className="rounded-lg bg-surface-2 px-3 py-1.5 text-xs txt-soft transition hov-surface-2"
                     >
                       Abrir timeline
                     </button>
@@ -1421,7 +1356,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                 </div>
 
                 <div className="xl:hidden px-4 py-3" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
-                  <div className="mb-2 text-[10px] uppercase tracking-wide text-slate-500">Conversas</div>
+                  <div className="mb-2 text-[10px] uppercase tracking-wide txt-muted">Conversas</div>
                   <div className="flex gap-2 overflow-x-auto pb-1">
                     {visibleChatSessions.map((chat) => (
                       <button
@@ -1436,11 +1371,11 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         className={`shrink-0 rounded-xl border px-3 py-2 text-left text-xs transition ${
                           chat.id === activeChat.id
                             ? 'border-blue-500/30 bg-blue-500/10 text-white'
-                            : 'border-slate-800 bg-slate-900/70 text-slate-300'
+                            : 'brd bg-surface-1 txt-soft'
                         }`}
                       >
                         <div className="font-medium">{chat.title}</div>
-                        <div className="mt-1 text-[10px] text-slate-400">{chat.messageCount} msgs</div>
+                        <div className="mt-1 text-[10px] txt-soft">{chat.messageCount} msgs</div>
                       </button>
                     ))}
                   </div>
@@ -1455,10 +1390,11 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                       const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
                       shouldAutoScrollRef.current = distanceToBottom < 72;
                     }}
-                    className="flex-1 overflow-y-auto p-4 flex flex-col gap-4"
+                    className="flex-1 overflow-y-auto px-4 py-6"
                   >
+                    <div className="mx-auto flex w-full max-w-4xl flex-col gap-5">
                     {messages.map((msg) => (
-                      <div key={msg.id} className={`flex flex-col ${msg.role === 'user' ? 'items-end self-end' : 'items-start'} max-w-2xl`}>
+                      <div key={msg.id} className={`flex flex-col max-w-[88%] ${msg.role === 'user' ? 'items-end self-end' : 'items-start self-start'}`}>
                         {msg.role === 'ai' && (
                           <div className="mb-1 flex items-center gap-2 px-1">
                             <span className={`rounded-full border px-2 py-0.5 text-[10px] ${getMessageKindTone(msg.kind)}`}>
@@ -1469,17 +1405,38 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                                 {getCommandStatusLabel(msg.status)}
                               </span>
                             )}
-                            {msg.model && <span className="text-[10px] text-slate-500">{msg.model}</span>}
-                            {msg.mode && <span className="text-[10px] text-slate-500">{msg.mode === 'think' ? 'Think' : 'Instant'}</span>}
+                            {msg.model && <span className="text-[10px] txt-muted">{msg.model}</span>}
+                            {msg.mode && <span className="text-[10px] txt-muted">{msg.mode === 'instant' ? 'Instant' : 'Think (Agente)'}</span>}
+                            {typeof msg.cost === 'number' && msg.cost > 0 && (
+                              <span className="text-[10px] text-emerald-300/80" title="Custo cobrado desta resposta">
+                                ${msg.cost.toFixed(4)}
+                              </span>
+                            )}
                           </div>
                         )}
                         <div className={`p-4 rounded-2xl text-sm whitespace-pre-wrap leading-relaxed ${msg.role === 'user' ? 'rounded-tr-sm text-white' : 'rounded-tl-sm'}`} style={msg.role === 'user' ? { background: 'var(--accent)', boxShadow: '0 2px 12px rgba(59,130,246,0.25)' } : { background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>
                           {msg.role === 'ai' ? (
                             <>
+                              {msg.reasoning && msg.reasoning.trim() && (
+                                <details
+                                  open={msg.phase === 'thinking' || msg.phase === 'writing'}
+                                  className="mb-3 rounded-xl border border-violet-500/20 bg-violet-500/[0.06]"
+                                >
+                                  <summary className="flex cursor-pointer select-none items-center gap-1.5 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-violet-300">
+                                    <Sparkles className="h-3 w-3" />
+                                    Raciocínio
+                                    {msg.phase === 'thinking' && <span className="normal-case text-violet-400/70">· pensando…</span>}
+                                  </summary>
+                                  <div className="whitespace-pre-wrap px-3 pb-3 text-xs leading-relaxed txt-soft">
+                                    {msg.reasoning}
+                                  </div>
+                                </details>
+                              )}
+                              {msg.plan && msg.plan.length > 0 && <AgentPlanChecklist plan={msg.plan} />}
                               <TypewriterContent
                                 content={msg.content}
                                 animate={msg.phase === 'writing' && msg.mode === 'think'}
-                                thinking={msg.phase === 'thinking'}
+                                thinking={msg.phase === 'thinking' && !msg.reasoning}
                                 executions={msg.executions || []}
                                 progressSteps={msg.progressSteps || []}
                                 pipelineStep={msg.pipelineStep ?? 1}
@@ -1497,20 +1454,21 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         </div>
                       </div>
                     ))}
+                    </div>
                   </div>
 
                   <div className="p-4" style={{ borderTop: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
                     {composerReferences.length > 0 && (
-                      <div className="mb-3 rounded-2xl border border-slate-800 bg-slate-900/70 p-3">
+                      <div className="mb-3 rounded-2xl border brd bg-surface-1 p-3">
                         <div className="mb-2 flex items-center justify-between gap-2">
-                          <div className="text-[10px] uppercase tracking-wide text-slate-500">Itens anexados ao chat</div>
+                          <div className="text-[10px] uppercase tracking-wide txt-muted">Itens anexados ao chat</div>
                           <button
                             type="button"
                             onClick={() => {
                               setInput((current) => removeChatReferences(current));
                               setComposerNotice('');
                             }}
-                            className="inline-flex items-center gap-1 text-xs text-slate-400 transition hover:text-slate-200"
+                            className="inline-flex items-center gap-1 text-xs txt-soft transition hov-txt"
                           >
                             <X className="h-3.5 w-3.5" />
                             Limpar anexos
@@ -1531,8 +1489,8 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         disabled={selectedExplorerPaths.length === 0}
                         className={`inline-flex items-center gap-2 rounded-2xl border px-3 py-2 text-xs transition ${
                           selectedExplorerPaths.length === 0
-                            ? 'cursor-not-allowed border-slate-800 bg-slate-900/60 text-slate-500'
-                            : 'border-slate-700 bg-slate-900 text-slate-200 hover:border-slate-600'
+                            ? 'cursor-not-allowed brd bg-surface-1 txt-muted'
+                            : 'brd-strong bg-surface-1 txt-soft hov-brd-strong'
                         }`}
                       >
                         <Plus className="h-4 w-4" />
@@ -1544,7 +1502,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         className={`rounded-2xl border px-3 py-2 text-xs font-medium transition ${
                           agentMode === 'instant'
                             ? 'border-blue-500/30 bg-blue-500/15 text-blue-100'
-                            : 'border-slate-700 bg-slate-900 text-slate-300'
+                            : 'brd-strong bg-surface-1 txt-soft'
                         }`}
                       >
                         Instant
@@ -1552,20 +1510,38 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                       <button
                         type="button"
                         onClick={() => setAgentMode('think')}
-                        className={`rounded-2xl border px-3 py-2 text-xs font-medium transition ${
+                        className={`inline-flex items-center gap-1.5 rounded-2xl border px-3 py-2 text-xs font-medium transition ${
                           agentMode === 'think'
                             ? 'border-violet-500/30 bg-violet-500/15 text-violet-100'
-                            : 'border-slate-700 bg-slate-900 text-slate-300'
+                            : 'brd-strong bg-surface-1 txt-soft'
                         }`}
                       >
-                        Think
+                        <Bot className="h-3.5 w-3.5" />
+                        Think (Agente)
                       </button>
-                      <div className="text-xs text-slate-500">
-                        {agentMode === 'think' ? 'Mais contexto e mais qualidade.' : 'Menor custo e menor latencia.'}
+                      <div className="text-xs txt-muted">
+                        {agentMode === 'think'
+                          ? 'Agente: planeja, executa um passo, lê o resultado real e decide o próximo (1 aprovação só).'
+                          : 'Resposta única e rápida, menor custo.'}
                       </div>
                     </div>
 
                     <div className="relative rounded-2xl p-2" style={{ border: '1px solid var(--border-strong)', background: 'var(--bg-elevated)' }}>
+                      {attachments.length > 0 && (
+                        <div className="flex flex-wrap gap-2 px-2 pt-1.5 pb-1">
+                          {attachments.map((a, i) => (
+                            <div key={i} className="flex items-center gap-1.5 px-2 py-1 rounded-lg border brd-strong bg-surface-1 text-xs txt-soft">
+                              {a.kind === 'image'
+                                ? (a.url ? <img src={a.url} alt="" className="w-4 h-4 rounded object-cover" /> : <ImageIcon className="w-3 h-3 text-blue-400" />)
+                                : <FileCode className="w-3 h-3 text-violet-400" />}
+                              <span className="max-w-[130px] truncate">{a.name}</span>
+                              <button onClick={() => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} className="txt-muted hover:text-red-300">
+                                <X className="w-3 h-3" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       <textarea
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
@@ -1577,11 +1553,29 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         }}
                         placeholder="Digite uma tarefa..."
                         disabled={isChatBusy}
-                        className={`min-h-[112px] w-full resize-none rounded-xl bg-transparent pl-4 pr-12 py-3 text-white focus:outline-none text-sm leading-relaxed ${
-                          isChatBusy ? 'cursor-not-allowed text-slate-500' : ''
+                        className={`min-h-[112px] w-full resize-none rounded-xl bg-transparent pl-12 pr-12 py-3 text-white focus:outline-none text-sm leading-relaxed ${
+                          isChatBusy ? 'cursor-not-allowed txt-muted' : ''
                         }`}
                         style={{ caretColor: '#60a5fa' }}
                       />
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        multiple
+                        hidden
+                        accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,.txt,.md,.markdown,.csv,.log,.json,.yaml,.yml,.lua,.luau,.js,.ts,.jsx,.tsx,.py,.html,.css,.xml,.zip"
+                        onChange={(e) => handleFilesSelected(e.target.files)}
+                      />
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={uploading || isChatBusy}
+                        title="Anexar imagem ou arquivo (.pdf, .md, .txt, .zip...)"
+                        className={`absolute left-3 bottom-3 w-8 h-8 rounded-xl flex items-center justify-center transition-all border brd-strong ${
+                          uploading || isChatBusy ? 'cursor-not-allowed opacity-40' : 'txt-soft hov-surface-2 hover:text-white'
+                        }`}
+                      >
+                        {uploading ? <Sparkles className="w-3.5 h-3.5 animate-pulse" /> : <Paperclip className="w-3.5 h-3.5" />}
+                      </button>
                       <button
                         onClick={handleSend}
                         disabled={isChatBusy}
@@ -1592,7 +1586,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         <Send className="w-3.5 h-3.5" />
                       </button>
                     </div>
-                    <div className="mt-2 flex items-center justify-between gap-2 text-xs text-slate-400">
+                    <div className="mt-2 flex items-center justify-between gap-2 text-xs txt-soft">
                       <span>
                         {isChatBusy
                           ? 'O chat esta bloqueado enquanto a requisicao atual aguarda aprovacao, execucao ou cancelamento.'
@@ -1609,10 +1603,10 @@ export default function ProjectView({ params }: { params: { id: string } }) {
           ) : (
             <div className="flex-1 overflow-hidden p-4">
               {isSelectedNodeScript ? (
-                <div className="flex h-full flex-col rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+                <div className="flex h-full flex-col rounded-2xl border brd bg-sunken p-4">
                   <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <div className="text-xs uppercase tracking-wide text-slate-500">Visualizacao ampliada</div>
+                      <div className="text-xs uppercase tracking-wide txt-muted">Visualizacao ampliada</div>
                       <div className="mt-1 flex items-center gap-2">
                         {getNodeIcon(selectedScriptType)}
                         <span className="font-semibold text-slate-100">{selectedNode?.nome}</span>
@@ -1627,7 +1621,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                         setMainPanelView('chat');
                         setActiveSidebarTab('chat');
                       }}
-                      className="rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-200 transition hover:border-slate-600 hover:bg-slate-800"
+                      className="rounded-xl border brd-strong bg-surface-1 px-3 py-2 text-xs txt-soft transition hov-brd-strong hov-surface-2"
                     >
                       Voltar ao chat
                     </button>
@@ -1642,7 +1636,7 @@ export default function ProjectView({ params }: { params: { id: string } }) {
                   </div>
                 </div>
               ) : (
-                <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-800 bg-slate-950/40 p-6 text-center text-sm text-slate-400">
+                <div className="flex h-full items-center justify-center rounded-2xl border border-dashed brd bg-sunken p-6 text-center text-sm txt-soft">
                   Selecione um `Script`, `LocalScript` ou `ModuleScript` no explorer e clique em `Ver Script`.
                 </div>
               )}
@@ -1724,8 +1718,8 @@ function ExplorerBranch({
       <div
         className={`group flex w-full items-center gap-2 rounded-xl border px-2 py-1.5 text-left transition ${
           isSelected
-            ? 'border-slate-700 bg-slate-800/90 text-blue-200 shadow-[0_0_0_1px_rgba(59,130,246,0.2)]'
-            : 'border-transparent text-slate-300 hover:border-slate-800 hover:bg-slate-800/70'
+            ? 'brd-strong bg-surface-2 text-blue-200 shadow-[0_0_0_1px_rgba(59,130,246,0.2)]'
+            : 'border-transparent txt-soft hov-surface-2'
         }`}
       >
         <button
@@ -1734,7 +1728,7 @@ function ExplorerBranch({
             event.stopPropagation();
             if (hasChildren) onToggleCollapsed(currentPath);
           }}
-          className="flex h-5 w-5 items-center justify-center rounded text-slate-500 transition hover:bg-slate-700/70 hover:text-slate-200"
+          className="flex h-5 w-5 items-center justify-center rounded txt-muted transition hov-surface-2 hover:text-white"
         >
           <ChevronDown className={`h-3.5 w-3.5 transition ${hasChildren ? (isCollapsed ? '-rotate-90' : 'rotate-0') : 'text-transparent'}`} />
         </button>
@@ -1766,7 +1760,7 @@ function ExplorerBranch({
           className={`inline-flex min-w-[74px] items-center justify-center gap-1 rounded-xl border px-2 py-1 text-[11px] font-medium transition ${
             isMarkedForChat
               ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-200'
-              : 'border-slate-700 bg-slate-900/80 text-slate-300 hover:border-slate-600 hover:text-white'
+              : 'brd-strong bg-surface-1 txt-soft hov-brd-strong hover:text-white'
           }`}
           title={isMarkedForChat ? 'Remover da selecao do chat' : 'Selecionar para enviar ao chat'}
         >
@@ -1775,7 +1769,7 @@ function ExplorerBranch({
         </button>
       </div>
       {hasChildren && !isCollapsed && (
-        <div className="ml-3 border-l border-slate-700 pl-1">
+        <div className="ml-3 border-l brd-strong pl-1">
           {node.filhos.map((child, index) => (
             <ExplorerBranch
               key={`${child.nome}-${index}-${child.propriedades?.Path || ''}`}
@@ -1810,7 +1804,7 @@ function ScriptViewer({
   const lines = String(source || '').split('\n');
 
   return (
-    <div className={`overflow-hidden rounded-2xl border bg-slate-950/95 ${theme.borderClass}`}>
+    <div className={`overflow-hidden rounded-2xl border bg-sunken ${theme.borderClass}`}>
       <div className={`flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2 ${theme.headerClass}`}>
         <div className="flex items-center gap-2">
           <div className={`flex h-8 w-8 items-center justify-center rounded-lg border ${theme.iconWrapperClass}`}>
@@ -1818,18 +1812,18 @@ function ScriptViewer({
           </div>
           <div>
             <div className={`text-sm font-semibold ${theme.titleClass}`}>{scriptType}</div>
-            <div className="text-[11px] text-slate-400">Conteudo sincronizado do Studio</div>
+            <div className="text-[11px] txt-soft">Conteudo sincronizado do Studio</div>
           </div>
         </div>
-        <div className="flex flex-wrap gap-2 text-[10px] uppercase tracking-wide text-slate-300">
-          <span className="rounded-full border border-slate-700 bg-slate-900/80 px-2 py-1">{analysis.lineCount} linhas</span>
-          <span className="rounded-full border border-slate-700 bg-slate-900/80 px-2 py-1">{analysis.functionCount} funcoes</span>
-          <span className="rounded-full border border-slate-700 bg-slate-900/80 px-2 py-1">{analysis.requireCount} requires</span>
-          <span className="rounded-full border border-slate-700 bg-slate-900/80 px-2 py-1">{analysis.commentCount} comentarios</span>
+        <div className="flex flex-wrap gap-2 text-[10px] uppercase tracking-wide txt-soft">
+          <span className="rounded-full border brd-strong bg-surface-1 px-2 py-1">{analysis.lineCount} linhas</span>
+          <span className="rounded-full border brd-strong bg-surface-1 px-2 py-1">{analysis.functionCount} funcoes</span>
+          <span className="rounded-full border brd-strong bg-surface-1 px-2 py-1">{analysis.requireCount} requires</span>
+          <span className="rounded-full border brd-strong bg-surface-1 px-2 py-1">{analysis.commentCount} comentarios</span>
         </div>
       </div>
 
-      <div className="border-b border-slate-800 bg-slate-900/60 px-3 py-2 text-[11px] text-slate-400">
+      <div className="border-b brd bg-surface-1 px-3 py-2 text-[11px] txt-soft">
         {theme.summaryText} {analysis.hasReturn ? 'Possui retorno declarado.' : 'Sem retorno declarado.'} Use `Ctrl + U` para anexar a selecao atual ao chat.
       </div>
 
@@ -1839,9 +1833,9 @@ function ScriptViewer({
             <div
               key={`${scriptType}-${index}`}
               data-script-line-index={index + 1}
-              className="grid grid-cols-[56px_1fr] border-b border-slate-900/80 font-mono text-xs last:border-b-0"
+              className="grid grid-cols-[56px_1fr] border-b brd font-mono text-xs last:border-b-0"
             >
-              <div className="select-none bg-slate-950 px-3 py-1.5 text-right text-slate-500">
+              <div className="select-none bg-sunken px-3 py-1.5 text-right txt-muted">
                 {index + 1}
               </div>
               <pre className={`overflow-x-auto whitespace-pre-wrap break-words px-3 py-1.5 ${theme.codeClass}`}>
@@ -2156,7 +2150,10 @@ function buildChatMessages(
         kind: normalizeResponseType(cmd.payload?.aiResponseType),
         phase: 'done',
         model: cmd.payload?.selectedModel || cmd.payload?.model,
-        mode: cmd.payload?.aiMode === 'think' ? 'think' : 'instant',
+        mode: (cmd.payload?.aiMode2 === 'think' || cmd.payload?.aiMode2 === 'agent' || cmd.payload?.aiMode === 'think') ? 'think' : 'instant',
+        cost: (Number(cmd.payload?.aiBilling?.chargedUsd) || 0) + (Number(cmd.payload?.agentCostUsd) || 0),
+        plan: Array.isArray(cmd.payload?.agentPlan) ? cmd.payload.agentPlan : undefined,
+        reasoning: typeof cmd.payload?.aiReasoning === 'string' ? cmd.payload.aiReasoning : undefined,
         executions: Array.isArray(cmd.payload?.aiStructuredResponse?.executions)
           ? cmd.payload.aiStructuredResponse.executions
           : Array.isArray(cmd.payload?.aiExecutions)
@@ -2219,8 +2216,11 @@ function buildChatMessages(
       phase: optimisticAssistant.phase,
       model: optimisticAssistant.model,
       mode: optimisticAssistant.mode,
+      reasoning: optimisticAssistant.reasoning,
       progressSteps: optimisticAssistant.progressSteps,
       pipelineStep: optimisticAssistant.pipelineStep,
+      cost: optimisticAssistant.cost,
+      plan: optimisticAssistant.plan,
       executions: [],
     });
   }
@@ -2899,6 +2899,44 @@ function ExecutionReferenceCard({
         </span>
       )}
     </span>
+  );
+}
+
+function AgentPlanChecklist({ plan }: { plan: { title: string; status: string }[] }) {
+  const doneCount = plan.filter((t) => t.status === 'done').length;
+  return (
+    <div className="mb-3 rounded-2xl border brd bg-surface-1 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--accent)' }}>
+          <CheckSquare2 className="h-3.5 w-3.5" />
+          Plano do agente
+        </div>
+        <span className="text-[10px] txt-muted">{doneCount}/{plan.length}</span>
+      </div>
+      <ul className="space-y-1.5">
+        {plan.map((task, index) => {
+          const status = task.status;
+          const icon =
+            status === 'done' ? (
+              <CheckSquare2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+            ) : status === 'failed' ? (
+              <X className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+            ) : status === 'doing' ? (
+              <Clock3 className="h-3.5 w-3.5 shrink-0 animate-pulse text-violet-300" />
+            ) : (
+              <Square className="h-3.5 w-3.5 shrink-0 txt-muted" />
+            );
+          return (
+            <li key={index} className="flex items-start gap-2 text-xs">
+              <span className="mt-0.5">{icon}</span>
+              <span className={status === 'done' ? 'line-through txt-muted' : status === 'failed' ? 'text-rose-200' : 'txt-soft'}>
+                {task.title}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 

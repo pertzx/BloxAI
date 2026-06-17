@@ -10,6 +10,8 @@ local HttpClient = require(script.Parent.HttpClient)
 local HttpService = game:GetService("HttpService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local running = false
+
 local function resolveInstanceReference(reference)
     if reference == nil then
         return nil
@@ -50,6 +52,28 @@ local function destroySafely(instance)
     pcall(function()
         instance:Destroy()
     end)
+end
+
+local FREE_SOURCE_TIMEOUT_SECONDS = 15
+
+-- Executa `fn` protegido com um deadline. Retorna (finished, ok, result).
+-- OBS: Luau é cooperativo. Um loop apertado SEM yield (ex.: `while true do end`)
+-- não pode ser interrompido e ainda congela o Studio inteiro — isso é uma
+-- limitação da engine. Este watchdog cobre scripts que cedem (task.wait, chamadas
+-- assíncronas) e estouram o tempo, evitando travar o loop de execução para sempre.
+local function runWithTimeout(fn, timeoutSeconds)
+    local finished, ok, result = false, false, nil
+    task.spawn(function()
+        ok, result = pcall(fn)
+        finished = true
+    end)
+
+    local startedAt = os.clock()
+    while not finished and (os.clock() - startedAt) < timeoutSeconds do
+        task.wait(0.05)
+    end
+
+    return finished, ok, result
 end
 
 local function buildFreeSourceError(code, summary, detail, source)
@@ -128,8 +152,16 @@ local function executeFreeLuauViaTemporaryModule(source)
         )
     end
 
-    local runOk, result = pcall(exported)
+    local finished, runOk, result = runWithTimeout(exported, FREE_SOURCE_TIMEOUT_SECONDS)
     destroySafely(moduleScript)
+    if not finished then
+        return false, buildFreeSourceError(
+            "FREE_SOURCE_TEMP_MODULE_TIMEOUT",
+            "O source livre excedeu o tempo limite no fallback por ModuleScript e foi considerado travado.",
+            "Nao retornou em " .. FREE_SOURCE_TIMEOUT_SECONDS .. "s.",
+            source
+        )
+    end
     if not runOk then
         return false, buildFreeSourceError(
             "FREE_SOURCE_TEMP_MODULE_RUNTIME_FAILED",
@@ -140,12 +172,13 @@ local function executeFreeLuauViaTemporaryModule(source)
     end
 
     if result == nil then
-        return false, buildFreeSourceError(
-            "FREE_SOURCE_TEMP_MODULE_NO_RESULT",
-            "O source livre executou no fallback por ModuleScript, mas nao retornou um resumo verificavel.",
-            "Adicione um return final com uma tabela de resumo.",
-            source
-        )
+        -- Código rodou sem erro e não retornou tabela de resumo. Isso é SUCESSO
+        -- (a maioria dos scripts úteis só cria instâncias e não retorna nada).
+        return true, {
+            ok = true,
+            summary = "Código executado com sucesso (sem tabela de resumo retornada).",
+            executorStrategy = "temporary-module",
+        }
     end
 
     return normalizeFreeSourceSuccess(result, "temporary-module")
@@ -176,7 +209,15 @@ local function executeFreeLuau(payload)
         )
     end
 
-    local ok, result = pcall(chunk)
+    local finished, ok, result = runWithTimeout(chunk, FREE_SOURCE_TIMEOUT_SECONDS)
+    if not finished then
+        return false, buildFreeSourceError(
+            "FREE_SOURCE_LOADSTRING_TIMEOUT",
+            "O source livre excedeu o tempo limite via loadstring e foi considerado travado.",
+            "Nao retornou em " .. FREE_SOURCE_TIMEOUT_SECONDS .. "s. Loops sem yield nao podem ser interrompidos no Luau.",
+            source
+        )
+    end
     if not ok then
         return false, buildFreeSourceError(
             "FREE_SOURCE_LOADSTRING_RUNTIME_FAILED",
@@ -187,12 +228,13 @@ local function executeFreeLuau(payload)
     end
 
     if result == nil then
-        return false, buildFreeSourceError(
-            "FREE_SOURCE_LOADSTRING_NO_RESULT",
-            "O source livre executou via loadstring, mas nao retornou um resumo verificavel.",
-            "Adicione um return final com uma tabela de resumo.",
-            source
-        )
+        -- Código rodou sem erro e não retornou tabela de resumo. Isso é SUCESSO
+        -- (a maioria dos scripts úteis só cria instâncias e não retorna nada).
+        return true, {
+            ok = true,
+            summary = "Código executado com sucesso (sem tabela de resumo retornada).",
+            executorStrategy = "loadstring",
+        }
     end
 
     return normalizeFreeSourceSuccess(result, "loadstring")
@@ -265,16 +307,28 @@ function CommandExecutor:ExecuteCommand(command)
     return success, result
 end
 
+function CommandExecutor:Stop()
+    running = false
+end
+
 function CommandExecutor:Start()
+    if running then return end
+    running = true
     Logger.Info("CommandExecutor Iniciado. Aguardando comandos da fila...")
     local AuthManager = require(script.Parent.Parent.Auth.AuthManager)
     local UI = require(script.Parent.Parent.UI.ChatWindow)
-    
+
     -- Polling real na API
     task.spawn(function()
-        while true do
+        while running do
             if AuthManager:IsAuthenticated() then
-                local success, response = HttpClient:Get("/commands/next")
+                -- Informa o projeto aberto no Studio para não puxar comando do jogo errado.
+                local projectId = AuthManager:GetProjectId()
+                local nextEndpoint = "/commands/next"
+                if projectId then
+                    nextEndpoint = nextEndpoint .. "?projectId=" .. tostring(projectId)
+                end
+                local success, response = HttpClient:Get(nextEndpoint)
                 if success and response and response.command then
                     UI:ShowCommandPreview(response.command)
                     UI:ShowFeedback("Executando " .. tostring(response.command.action) .. "...", Color3.fromRGB(253, 224, 71))

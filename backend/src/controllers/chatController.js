@@ -4,6 +4,7 @@ import { AiJob } from '../models/AiJob.js';
 import { CreditService } from '../services/CreditService.js';
 import { ChatService } from '../services/ChatService.js';
 import { jobQueue } from '../services/JobQueue.js';
+import { buildAttachmentsBlock } from '../services/FileService.js';
 
 export const handleChatIntent = async (req, res) => {
   try {
@@ -12,10 +13,15 @@ export const handleChatIntent = async (req, res) => {
       return res.status(404).json({ error: 'Projeto não encontrado' });
     }
 
-    const { intent, chatId, chatTitle, model, mode } = req.body || {};
+    const { intent, chatId, chatTitle, model, mode, attachments } = req.body || {};
     if (!intent) {
       return res.status(400).json({ error: 'Faltam parâmetros' });
     }
+
+    // Anexos do usuário são injetados como contexto no próprio intent
+    // (flui para os modos think e instant sem replumbing).
+    const attachBlock = buildAttachmentsBlock(attachments);
+    const effectiveIntent = attachBlock ? `${intent}\n\n${attachBlock}` : intent;
 
     // Valida saldo e status da conta antes de gastar API de IA.
     const billingUser = await User.findById(req.user.id);
@@ -37,7 +43,7 @@ export const handleChatIntent = async (req, res) => {
       const job = await AiJob.create({
         project: project._id,
         user: req.user.id,
-        intent,
+        intent: effectiveIntent,
         chatId: typeof chatId === 'string' && chatId.trim() ? chatId.trim() : 'default',
         chatTitle: typeof chatTitle === 'string' && chatTitle.trim() ? chatTitle.trim() : 'Chat principal',
         model: typeof model === 'string' && model.trim() ? model.trim() : '',
@@ -60,7 +66,7 @@ export const handleChatIntent = async (req, res) => {
     const out = await ChatService.runIntent({
       project,
       userId: req.user.id,
-      intent,
+      intent: effectiveIntent,
       chatId,
       chatTitle,
       model,

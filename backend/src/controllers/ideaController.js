@@ -208,7 +208,7 @@ export const generateIdeaImage = async (req, res) => {
     const idea = history.idea;
     const prompt = `Roblox-style 3D game cover art, vibrant and stylized, for a game called "${idea.title}". ${idea.tagline}. Genre: ${idea.genre}. ${idea.uniqueHook}. No text, no watermark, cinematic lighting, high quality render.`;
 
-    const { dataUrl, estimatedCostUsd } = await ImageService.generate(prompt, { size: '1024x1024', quality: 'medium' });
+    const { url: imageUrl, estimatedCostUsd } = await ImageService.generate(prompt, { size: '1024x1024', quality: 'medium' });
 
     // Cobra a imagem via margem (mesma carteira)
     let billing = null;
@@ -220,10 +220,10 @@ export const generateIdeaImage = async (req, res) => {
       });
     } catch (e) { console.error('[idea] falha ao cobrar imagem:', e?.message); }
 
-    history.imageUrl = dataUrl;
+    history.imageUrl = imageUrl;
     await history.save();
 
-    res.json({ success: true, imageUrl: dataUrl, billing });
+    res.json({ success: true, imageUrl, billing });
   } catch (err) {
     console.error('[idea] generateIdeaImage:', err);
     res.status(500).json({ error: err.message || 'Falha ao gerar imagem.' });

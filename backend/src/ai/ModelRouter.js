@@ -19,45 +19,54 @@ export class ModelRouter {
         ? { model: modelOrOptions, systemPrompt }
         : { ...modelOrOptions, systemPrompt: modelOrOptions.systemPrompt || systemPrompt };
 
-    const routedModel = this.resolveModelLabel(options.model);
-    console.log(`[ModelRouter] Roteando prompt para o modelo: ${routedModel.label}`);
+    const preferred = this.normalizePreferredModel(options.model) || 'DeepSeek-V3';
+    const chain = this.buildModelFallbackChain(preferred);
+    let lastError = null;
 
-    try {
-      if (routedModel.provider === 'anthropic') {
-        return await this.callAnthropic(
-          ANTHROPIC_API_KEY,
+    for (let idx = 0; idx < chain.length; idx += 1) {
+      const routedModel = this.resolveModelLabel(chain[idx]);
+      if (idx === 0) console.log(`[ModelRouter] Roteando para: ${routedModel.label}`);
+      else console.warn(`[ModelRouter] Fallback → ${routedModel.label} (anterior falhou)`);
+
+      try {
+        if (routedModel.provider === 'anthropic') {
+          return await this.callAnthropic(
+            ANTHROPIC_API_KEY,
+            routedModel.apiModel,
+            prompt,
+            options.systemPrompt || systemPrompt,
+            options.maxTokens,
+            options.temperature
+          );
+        }
+
+        const apiKey = routedModel.label === 'GPT-5.4 Mini' ? OPENAI_API_KEY : DEEPSEEK_API_KEY;
+        const url =
+          routedModel.label === 'GPT-5.4 Mini'
+            ? 'https://api.openai.com/v1/chat/completions'
+            : 'https://api.deepseek.com/v1/chat/completions';
+
+        return await this.callOpenAICompatible(
+          url,
+          apiKey,
           routedModel.apiModel,
           prompt,
           options.systemPrompt || systemPrompt,
           options.maxTokens,
           options.temperature
         );
+      } catch (error) {
+        lastError = error;
+        console.error(`[ModelRouter] ${routedModel.label} falhou: ${error.message}`);
       }
-
-      const apiKey = routedModel.label === 'GPT-5.4 Mini' ? OPENAI_API_KEY : DEEPSEEK_API_KEY;
-      const url =
-        routedModel.label === 'GPT-5.4 Mini'
-          ? 'https://api.openai.com/v1/chat/completions'
-          : 'https://api.deepseek.com/v1/chat/completions';
-
-      return await this.callOpenAICompatible(
-        url,
-        apiKey,
-        routedModel.apiModel,
-        prompt,
-        options.systemPrompt || systemPrompt,
-        options.maxTokens,
-        options.temperature
-      );
-    } catch (error) {
-      console.error('[ModelRouter] Erro ao chamar a API real:', error.message);
-      return {
-        success: false,
-        text: `[Erro de Conexão AI] Verifique suas chaves de API. Detalhe: ${error.message}`,
-        model: routedModel.label,
-        usage: this.buildUsageSummary(routedModel, 0, 0, prompt, ''),
-      };
     }
+
+    return {
+      success: false,
+      text: `[Erro de IA] Nenhum modelo respondeu. Verifique as chaves de API. Detalhe: ${lastError?.message || 'desconhecido'}`,
+      model: preferred,
+      usage: this.buildUsageSummary(this.resolveModelLabel(preferred), 0, 0, prompt, ''),
+    };
   }
 
   static selectModel(options = {}) {
@@ -103,7 +112,8 @@ export class ModelRouter {
       return {
         label: 'Claude 3.5',
         provider: 'anthropic',
-        apiModel: 'claude-3-5-sonnet-20240620',
+        // Override por env (ANTHROPIC_MODEL) — default é um modelo real válido.
+        apiModel: process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20240620',
       };
     }
 
@@ -111,15 +121,31 @@ export class ModelRouter {
       return {
         label: 'GPT-5.4 Mini',
         provider: 'openai-compatible',
-        apiModel: 'gpt-5.4-mini',
+        // 'gpt-5.4-mini' NÃO existe na OpenAI. Default real + override por env (OPENAI_MODEL).
+        apiModel: process.env.OPENAI_MODEL || 'gpt-4o-mini',
       };
     }
 
     return {
       label: 'DeepSeek-V3',
       provider: 'openai-compatible',
-      apiModel: 'deepseek-chat',
+      apiModel: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
     };
+  }
+
+  /**
+   * Cadeia de fallback: tenta o modelo preferido primeiro e, se falhar (chave
+   * ausente, modelo inválido, timeout), cai para os demais modelos com chave
+   * configurada. Evita que um único modelo quebrado derrube toda a resposta.
+   */
+  static buildModelFallbackChain(preferredLabel) {
+    const available = this.getAvailableModels();
+    const chain = [];
+    if (preferredLabel) chain.push(preferredLabel);
+    for (const label of available) {
+      if (!chain.includes(label)) chain.push(label);
+    }
+    return chain.length > 0 ? chain : [preferredLabel || 'DeepSeek-V3'];
   }
 
   // ─── Streaming ────────────────────────────────────────────────────────────────
@@ -134,50 +160,67 @@ export class ModelRouter {
         ? { model: modelOrOptions }
         : { ...modelOrOptions };
 
-    const routedModel = this.resolveModelLabel(options.model);
-    console.log(`[ModelRouter] Stream para: ${routedModel.label}`);
+    const preferred = this.normalizePreferredModel(options.model) || 'DeepSeek-V3';
+    const chain = this.buildModelFallbackChain(preferred);
+    const systemPrompt = options.systemPrompt || 'Você é um assistente de IA focado em desenvolvimento para Roblox Studio.';
+    let lastError = null;
+    let streamedAny = false;
+    const guardedOnToken = (token) => {
+      streamedAny = true;
+      if (typeof onToken === 'function') return onToken(token);
+    };
 
-    try {
-      if (routedModel.provider === 'anthropic') {
-        return await this.streamAnthropic(
-          ANTHROPIC_API_KEY,
+    for (let idx = 0; idx < chain.length; idx += 1) {
+      const routedModel = this.resolveModelLabel(chain[idx]);
+      if (idx === 0) console.log(`[ModelRouter] Stream para: ${routedModel.label}`);
+      else console.warn(`[ModelRouter] Fallback de stream → ${routedModel.label}`);
+
+      try {
+        if (routedModel.provider === 'anthropic') {
+          return await this.streamAnthropic(
+            ANTHROPIC_API_KEY,
+            routedModel.apiModel,
+            prompt,
+            systemPrompt,
+            options.maxTokens,
+            options.temperature,
+            guardedOnToken
+          );
+        }
+
+        const apiKey = routedModel.label === 'GPT-5.4 Mini' ? OPENAI_API_KEY : DEEPSEEK_API_KEY;
+        const url =
+          routedModel.label === 'GPT-5.4 Mini'
+            ? 'https://api.openai.com/v1/chat/completions'
+            : 'https://api.deepseek.com/v1/chat/completions';
+
+        return await this.streamOpenAICompatible(
+          url,
+          apiKey,
           routedModel.apiModel,
           prompt,
-          options.systemPrompt || 'Você é um assistente de IA focado em desenvolvimento para Roblox Studio.',
+          systemPrompt,
           options.maxTokens,
           options.temperature,
-          onToken
+          guardedOnToken
         );
+      } catch (error) {
+        lastError = error;
+        console.error(`[ModelRouter] stream ${routedModel.label} falhou: ${error.message}`);
+        // Não dá para trocar de modelo no meio de um stream já iniciado.
+        if (streamedAny) break;
       }
-
-      const apiKey = routedModel.label === 'GPT-5.4 Mini' ? OPENAI_API_KEY : DEEPSEEK_API_KEY;
-      const url =
-        routedModel.label === 'GPT-5.4 Mini'
-          ? 'https://api.openai.com/v1/chat/completions'
-          : 'https://api.deepseek.com/v1/chat/completions';
-
-      return await this.streamOpenAICompatible(
-        url,
-        apiKey,
-        routedModel.apiModel,
-        prompt,
-        options.systemPrompt || 'Você é um assistente de IA focado em desenvolvimento para Roblox Studio.',
-        options.maxTokens,
-        options.temperature,
-        onToken
-      );
-    } catch (error) {
-      console.error('[ModelRouter] Erro no stream:', error.message);
-      return {
-        success: false,
-        text: `[Erro de Stream AI] ${error.message}`,
-        model: routedModel.label,
-        usage: this.buildUsageSummary(routedModel, 0, 0, prompt, ''),
-      };
     }
+
+    return {
+      success: false,
+      text: `[Erro de Stream AI] Nenhum modelo respondeu. Detalhe: ${lastError?.message || 'desconhecido'}`,
+      model: preferred,
+      usage: this.buildUsageSummary(this.resolveModelLabel(preferred), 0, 0, prompt, ''),
+    };
   }
 
-  static async streamOpenAICompatible(url, apiKey, modelName, prompt, systemPrompt, maxTokens = 1800, temperature = 0.2, onToken) {
+  static async streamOpenAICompatible(url, apiKey, modelName, prompt, systemPrompt, maxTokens = 8000, temperature = 0.2, onToken) {
     if (!apiKey) throw new Error(`API Key faltando para streaming (${modelName})`);
 
     const body = {
@@ -191,9 +234,9 @@ export class ModelRouter {
       stream_options: { include_usage: true },
     };
     if (modelName.startsWith('gpt-5')) {
-      body.max_completion_tokens = maxTokens ?? 1800;
+      body.max_completion_tokens = maxTokens ?? 8000;
     } else {
-      body.max_tokens = maxTokens ?? 1800;
+      body.max_tokens = maxTokens ?? 8000;
       delete body.stream_options;
     }
 
@@ -201,6 +244,7 @@ export class ModelRouter {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(180000),
     });
 
     if (!response.ok) {
@@ -213,6 +257,7 @@ export class ModelRouter {
     let fullText = '';
     let inputTokens = 0;
     let outputTokens = 0;
+    let finishReason = null;
     let buf = '';
 
     while (true) {
@@ -235,6 +280,9 @@ export class ModelRouter {
             fullText += delta;
             if (typeof onToken === 'function') await onToken(delta);
           }
+          if (parsed.choices?.[0]?.finish_reason) {
+            finishReason = parsed.choices[0].finish_reason;
+          }
           if (parsed.usage) {
             inputTokens = parsed.usage.prompt_tokens || 0;
             outputTokens = parsed.usage.completion_tokens || 0;
@@ -248,6 +296,8 @@ export class ModelRouter {
       success: true,
       text: fullText,
       model: routedModel.label,
+      finishReason,
+      truncated: finishReason === 'length',
       usage: this.buildUsageSummary(routedModel, inputTokens, outputTokens, prompt, fullText),
     };
   }
@@ -270,6 +320,7 @@ export class ModelRouter {
         temperature: temperature ?? 0.2,
         stream: true,
       }),
+      signal: AbortSignal.timeout(180000),
     });
 
     if (!response.ok) {
@@ -282,6 +333,7 @@ export class ModelRouter {
     let fullText = '';
     let inputTokens = 0;
     let outputTokens = 0;
+    let stopReason = null;
     let buf = '';
 
     while (true) {
@@ -305,8 +357,9 @@ export class ModelRouter {
               if (typeof onToken === 'function') await onToken(delta);
             }
           }
-          if (parsed.type === 'message_delta' && parsed.usage) {
-            outputTokens = parsed.usage.output_tokens || 0;
+          if (parsed.type === 'message_delta') {
+            if (parsed.usage) outputTokens = parsed.usage.output_tokens || 0;
+            if (parsed.delta?.stop_reason) stopReason = parsed.delta.stop_reason;
           }
           if (parsed.type === 'message_start' && parsed.message?.usage) {
             inputTokens = parsed.message.usage.input_tokens || 0;
@@ -320,13 +373,15 @@ export class ModelRouter {
       success: true,
       text: fullText,
       model: 'Claude 3.5',
+      finishReason: stopReason,
+      truncated: stopReason === 'max_tokens',
       usage: this.buildUsageSummary(routedModel, inputTokens, outputTokens, prompt, fullText),
     };
   }
 
   // ──────────────────────────────────────────────────────────────────────────────
 
-  static async callOpenAICompatible(url, apiKey, modelName, prompt, systemPrompt, maxTokens = 1800, temperature = 0.2) {
+  static async callOpenAICompatible(url, apiKey, modelName, prompt, systemPrompt, maxTokens = 8000, temperature = 0.2) {
     if (!apiKey) throw new Error(`API Key faltando para ${modelName}`);
 
     const requestBody = {
@@ -351,6 +406,7 @@ export class ModelRouter {
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(120000),
     });
 
     if (!response.ok) {
@@ -360,10 +416,13 @@ export class ModelRouter {
 
     const data = await response.json();
     const outputText = data.choices?.[0]?.message?.content || '';
+    const finishReason = data.choices?.[0]?.finish_reason || null;
     return {
       success: true,
       text: outputText,
       model: this.resolveModelLabel(modelName).label,
+      finishReason,
+      truncated: finishReason === 'length',
       usage: this.buildUsageSummary(
         this.resolveModelLabel(modelName),
         Number(data?.usage?.prompt_tokens || 0),
@@ -391,6 +450,7 @@ export class ModelRouter {
         max_tokens: maxTokens,
         temperature,
       }),
+      signal: AbortSignal.timeout(120000),
     });
 
     if (!response.ok) {
@@ -404,6 +464,8 @@ export class ModelRouter {
       success: true,
       text: outputText,
       model: 'Claude 3.5',
+      finishReason: data?.stop_reason || null,
+      truncated: data?.stop_reason === 'max_tokens',
       usage: this.buildUsageSummary(
         this.resolveModelLabel(modelName),
         Number(data?.usage?.input_tokens || 0),

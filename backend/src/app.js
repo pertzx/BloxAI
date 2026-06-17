@@ -8,6 +8,7 @@ import commandRoutes from './routes/commandRoutes.js';
 import pluginRoutes from './routes/pluginRoutes.js';
 import billingRoutes from './routes/billingRoutes.js';
 import ideaRoutes from './routes/ideaRoutes.js';
+import uploadRoutes from './routes/uploadRoutes.js';
 import { jobQueue } from './services/JobQueue.js';
 import { processAiThinkJob } from './services/AiThinkWorker.js';
 import { startEmailQueueWorker } from './services/EmailService.js';
@@ -51,6 +52,7 @@ app.use('/api/projects', projectRoutes);
 app.use('/api/commands', commandRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/ideas', ideaRoutes);
+app.use('/api/uploads', uploadRoutes);
 
 // Basic health check
 app.get('/health', (req, res) => {

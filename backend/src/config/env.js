@@ -33,6 +33,11 @@ export const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
 export const STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_PUBLISHABLE_KEY || '';
 export const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 
+// Cloudinary (armazenamento de imagens — NUNCA salvar imagem no banco)
+export const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || '';
+export const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || '';
+export const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || '';
+
 // AI Keys
 export const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';

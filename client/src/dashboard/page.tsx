@@ -1,6 +1,6 @@
 "use client";
 import React, { useEffect, useMemo, useState } from 'react';
-import { Bot, Folder, Plus, Search, User, Activity, Cpu, Radio, Clock3, X, ArrowRight, ShieldCheck, Sparkles, Lock, Settings, Trophy, Crown, Zap, Wallet } from 'lucide-react';
+import { Bot, Folder, Plus, Search, User, Activity, Cpu, Radio, Clock3, X, ArrowRight, ShieldCheck, Sparkles, Lock, Settings, Trophy, Crown, Zap, Wallet, Puzzle, Copy, Check, RefreshCw } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import api from '../api/api.js';
 
@@ -53,6 +53,7 @@ export default function Dashboard() {
   const [ranking, setRanking] = useState<RankRow[]>([]);
   const [billing, setBilling] = useState<Billing | null>(null);
   const [showUpgrade, setShowUpgrade] = useState(false);
+  const [pluginModalOpen, setPluginModalOpen] = useState(false);
   const router = useNavigate();
   const _token = localStorage.getItem('blox_token') ?? '';
   const isAdmin = decodeJwtRole(_token) === 'admin';
@@ -226,6 +227,14 @@ export default function Dashboard() {
               Fazer upgrade
             </Link>
           )}
+          <button
+            onClick={() => setPluginModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border transition-all hover:brightness-110"
+            style={{ background: 'rgba(16,185,129,0.12)', borderColor: 'rgba(16,185,129,0.25)', color: '#34d399' }}
+          >
+            <Puzzle className="w-3.5 h-3.5" />
+            Conectar plugin
+          </button>
           <button
             onClick={() => setIsCreateOpen(true)}
             className="btn-primary text-sm py-2 px-4 rounded-xl"
@@ -482,6 +491,87 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {pluginModalOpen && <PluginConnectModal onClose={() => setPluginModalOpen(false)} />}
+    </div>
+  );
+}
+
+function PluginConnectModal({ onClose }: { onClose: () => void }) {
+  const [pluginKey, setPluginKey] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [regenerating, setRegenerating] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [err, setErr] = useState('');
+  const headers = { Authorization: `Bearer ${localStorage.getItem('blox_token') ?? ''}` };
+
+  useEffect(() => {
+    api.get('/api/plugin/key', { headers })
+      .then((r) => setPluginKey(r.data?.pluginKey ?? ''))
+      .catch(() => setErr('Falha ao carregar a chave.'))
+      .finally(() => setLoading(false));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const regenerate = async () => {
+    if (!confirm('Regenerar a chave? O plugin precisará ser reconectado com a nova chave.')) return;
+    setRegenerating(true); setErr('');
+    try {
+      const r = await api.post('/api/plugin/key/regenerate', {}, { headers });
+      setPluginKey(r.data?.pluginKey ?? '');
+    } catch { setErr('Falha ao regenerar.'); }
+    finally { setRegenerating(false); }
+  };
+
+  const copy = async () => {
+    await navigator.clipboard.writeText(pluginKey);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60" style={{ backdropFilter: 'blur(4px)' }} onClick={onClose}>
+      <div className="glass-strong w-full max-w-md rounded-2xl p-6 animate-slide-up" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 mb-5">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.25)' }}>
+              <Puzzle className="w-4 h-4 text-emerald-400" />
+            </div>
+            <div>
+              <div className="text-base font-semibold text-white">Conectar plugin</div>
+              <div className="text-xs text-slate-500">Cole esta chave no plugin do Studio</div>
+            </div>
+          </div>
+          <button onClick={onClose} className="w-7 h-7 rounded-lg flex items-center justify-center border border-white/[0.08] hover:bg-white/[0.06] text-slate-400 hover:text-white shrink-0"><X className="w-3.5 h-3.5" /></button>
+        </div>
+
+        <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Sua chave de conta</label>
+        <div className="flex gap-2">
+          <div className="flex-1 input font-mono text-xs flex items-center overflow-hidden">
+            {loading ? <span className="text-slate-600">carregando...</span> : <span className="truncate text-slate-200">{pluginKey}</span>}
+          </div>
+          <button onClick={copy} disabled={loading || !pluginKey} className="btn-secondary px-3 rounded-xl disabled:opacity-50" title="Copiar">
+            {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+          </button>
+        </div>
+        {err && <div className="text-xs text-red-400 mt-2">{err}</div>}
+
+        <div className="mt-5 rounded-xl border border-white/[0.07] p-4 bg-white/[0.02]">
+          <div className="text-xs font-semibold text-slate-300 mb-2">Como conectar</div>
+          <ol className="text-xs text-slate-400 space-y-1.5 list-decimal list-inside">
+            <li>Abra seu jogo no Roblox Studio (precisa estar publicado).</li>
+            <li>Abra o plugin Blox AI.</li>
+            <li>Cole esta chave e clique em <span className="text-emerald-300">Conectar</span>.</li>
+            <li>O projeto é criado automaticamente para este jogo.</li>
+          </ol>
+        </div>
+
+        <div className="flex items-center justify-between mt-5">
+          <button onClick={regenerate} disabled={regenerating} className="text-xs text-slate-500 hover:text-red-300 flex items-center gap-1.5 disabled:opacity-50">
+            <RefreshCw className={`w-3.5 h-3.5 ${regenerating ? 'animate-spin' : ''}`} /> Regenerar chave
+          </button>
+          <button onClick={onClose} className="btn-primary py-2 px-4 text-sm rounded-xl">Pronto</button>
+        </div>
+      </div>
     </div>
   );
 }

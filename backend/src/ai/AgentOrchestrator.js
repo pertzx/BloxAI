@@ -1,4 +1,5 @@
 import { ModelRouter } from './ModelRouter.js';
+import { LuauValidator } from './LuauValidator.js';
 
 const PLUGIN_DOC_CAPSULE = `
 Blox AI plugin documentation capsule:
@@ -25,6 +26,17 @@ Blox AI plugin documentation capsule:
 - The AI should use the explorer only as context for better execution decisions, not as filler.
 `.trim();
 
+const ROBLOX_QUALITY_RULES = [
+  'REGRAS DE QUALIDADE ROBLOX (siga sempre):',
+  '- Detecção de jogador no Touched: use `local char = hit.Parent; local hum = char and char:FindFirstChildWhichIsA("Humanoid")` e `game:GetService("Players"):GetPlayerFromCharacter(char)`. NUNCA `hit:IsA("Player")` (hit é uma BasePart).',
+  '- Não use APIs depreciadas: use `AssemblyLinearVelocity` (não `.Velocity`), `task.wait`/`task.spawn` (não `wait`/`spawn`), `WaitForChild` para referências que podem não existir ainda.',
+  '- Configure TODAS as propriedades da instância ANTES de definir `.Parent` (evita replicação parcial e flicker).',
+  '- Idempotência: antes de criar algo, cheque com `FindFirstChild` e reutilize/limpe o existente para não duplicar a cada execução.',
+  '- Partes estruturais devem ter `Anchored = true`. Dê `Name` significativo a tudo que criar.',
+  '- Use serviços via `game:GetService(...)`. Coloque scripts no container correto (Server em ServerScriptService/dentro do objeto, cliente em StarterPlayerScripts).',
+  '- Código limpo, organizado e completo — nada de placeholder, TODO ou lógica pela metade.',
+].join('\n');
+
 export class AgentOrchestrator {
   static async processUserIntent(intent, context = {}) {
     this.logDebug('intent:start', {
@@ -43,8 +55,13 @@ export class AgentOrchestrator {
     }
 
     const selectedModels = this.selectModels(intentProfile, context.preferredModel);
-    const thinkSelection = await this.runThinkSelection(intent, context, intentProfile, selectedModels.think);
     const telemetryStages = [];
+    // Conversa pura não precisa do seletor de explorer (LLM) — evita gasto de tokens avulso.
+    // Para os demais tipos, o think-selection é cobrado via telemetryStages.
+    const thinkSelection =
+      intentProfile.responseType === 'conversation'
+        ? this.buildSkippedExplorerSelection('Conversa: explorer dispensado.')
+        : await this.runThinkSelection(intent, context, intentProfile, selectedModels.think, telemetryStages);
     const compactContext = this.buildCompactContext(intent, context, intentProfile, thinkSelection);
 
     if (intentProfile.responseType === 'conversation') {
@@ -59,7 +76,7 @@ export class AgentOrchestrator {
         model: selectedModels.generate,
         systemPrompt:
           'Você é um assistente conversacional para um painel de IA de desenvolvimento. Responda como chat natural, sem falar de fila, execução ou comandos se o usuário só estiver conversando. Responda cobrindo todos os pontos explicitos do pedido do usuario, sem ignorar subpedidos.',
-        maxTokens: 420,
+        maxTokens: 1200,
         temperature: 0.3,
       });
       this.pushUsageTelemetry(telemetryStages, 'conversation', reply);
@@ -108,7 +125,7 @@ export class AgentOrchestrator {
         model: selectedModels.generate,
         systemPrompt:
           'Você é um agente analitico do Blox AI. Quando o pedido for de analise, planejamento, revisao ou explicacao, responda em texto normal, sem gerar executions, sem fila e sem proposta de aprovacao.',
-        maxTokens: intentProfile.executionMode === 'deep' ? 5000 : 700,
+        maxTokens: intentProfile.executionMode === 'deep' ? 8000 : 4000,
         temperature: intentProfile.executionMode === 'deep' ? 0.4 : 0.2,
       });
       this.pushUsageTelemetry(telemetryStages, 'analysis', analysis);
@@ -177,7 +194,7 @@ export class AgentOrchestrator {
       model: selectedModels.generate,
       systemPrompt:
         'Você é o agente executor mestre do Blox AI. Responda em JSON puro no formato {"message":"texto","executions":[{"executionId":1,"source":"conteudo"}]}. O formato principal da execution deve ser source livre em Luau, auto contido e pronto para executar. Prefira uma única execution com um único source em Luau quando der para resolver a tarefa inteira sem perder contexto. Use esse source para criar scripts, editar scripts, criar elementos, instancias, partes e sistemas completos quando o pedido exigir. Se usar Luau, o source deve terminar com return de uma tabela resumo verificável. Se o source criar outro Script/LocalScript/ModuleScript e atribuir .Source, use obrigatoriamente long brackets [=[...]=] ou table.concat para o source embutido, nunca string multiline comum entre aspas. Antes de finalizar, confira mentalmente aspas, parenteses, brackets e blocos function/end. So use JSON com action/payload ou legacy plugin_call como fallback de compatibilidade, nao como formato principal. Na message, mencione execuções apenas como executionId:X. Cubra todos os itens explicitos do pedido do usuario e nao entregue resposta curta demais quando houver varios requisitos.',
-      maxTokens: intentProfile.executionMode === 'deep' ? 5000 : 1800,
+      maxTokens: 8000,
       temperature: intentProfile.executionMode === 'deep' ? 0.4 : 0.2,
     });
     this.pushUsageTelemetry(telemetryStages, 'generate', generation);
@@ -200,7 +217,10 @@ export class AgentOrchestrator {
       generation.text,
       selectedModels.review,
       telemetryStages,
-      generationEnvelopeIssue?.reason || ''
+      generationEnvelopeIssue?.reason ||
+        (generation.truncated
+          ? 'A geração foi cortada pelo limite de tokens (resposta incompleta). Reescreva a resposta inteira em JSON válido e mais enxuta, sem truncar o source nem o JSON.'
+          : '')
     );
     const expectsExecution =
       intentProfile.taskType === 'roblox_code' ||
@@ -223,8 +243,18 @@ export class AgentOrchestrator {
     );
     const finalStructuredResponse = validatedStructuredResponse || structuredResponse;
     this.logStructuredResponseDebug('response:final', finalStructuredResponse);
-    const executableCommands = this.compileExecutionsToCommands(finalStructuredResponse.executions);
+    let executableCommands = this.compileExecutionsToCommands(finalStructuredResponse.executions);
     this.logExecutableCommandsDebug('commands:compiled', executableCommands);
+
+    // Portão final: valida e autorrepara o Luau antes de qualquer enfileiramento.
+    if (executableCommands.length > 0) {
+      const validation = await this.validateAndRepairExecutions(executableCommands, {
+        reviewModel: selectedModels.review,
+        telemetrySink: telemetryStages,
+      });
+      executableCommands = validation.commands;
+      this.logDebug('validate:report', validation.report);
+    }
 
     if (expectsExecution && executableCommands.length === 0) {
       const fallbackExecutions =
@@ -351,7 +381,23 @@ export class AgentOrchestrator {
       normalized.includes('adicione') ||
       normalized.includes('adiciona') ||
       normalized.includes('insira') ||
-      normalized.includes('coloque');
+      normalized.includes('coloque') ||
+      normalized.includes('implementa') ||
+      normalized.includes('implemente') ||
+      normalized.includes('monta') ||
+      normalized.includes('monte') ||
+      normalized.includes('configura') ||
+      normalized.includes('configure') ||
+      normalized.includes('programa') ||
+      normalized.includes('programe') ||
+      normalized.includes('desenvolv') ||
+      normalized.includes('refatora') ||
+      normalized.includes('refatore') ||
+      normalized.includes('corrija') ||
+      normalized.includes('conserta') ||
+      normalized.includes('conserte') ||
+      normalized.includes('escreva') ||
+      normalized.includes('spawn');
 
     const isGreeting = /^(oi|ola|olá|e ai|e aí|bom dia|boa tarde|boa noite|hello|hi|hey)\b/.test(normalized.trim());
     const isShortConversation =
@@ -504,18 +550,33 @@ export class AgentOrchestrator {
       `Tipo: ${intentProfile.taskType}`,
       `ThinkExplorer: ${explorerSelection.reason}`,
       PLUGIN_DOC_CAPSULE,
+      ROBLOX_QUALITY_RULES,
       'Responda como agente independente, mestre do projeto e em controle do ambiente.',
       'Se o pedido for executável, devolva diretamente as execuções necessárias. Não transforme isso em tutorial passo a passo para o usuário.',
       'A resposta final deve ser operacional: o que sera feito e quais executions representam isso.',
       'O agente deve priorizar source livre em Luau como formato principal da execution. So use comando JSON com action/payload ou legacy plugin_call como fallback interno de compatibilidade. Prefira uma unica execution com um unico source Luau auto contido quando isso for suficiente. Use isso para criar e editar scripts, criar elementos e instancias, reorganizar objetos e montar sistemas completos. Se o source criar scripts internos, atribua `.Source` com long brackets [=[...]=] ou table.concat, nunca com string multiline comum. O backend exige aprovacao manual antes de executar.',
-      'A resposta inteira deve ser JSON valido estrito. Escape corretamente aspas, barras e quebras de linha dentro de `source`.',
-      'Se o source ficar grande, mantenha `message` curta para reduzir risco de JSON malformado.',
+      'Envelope: {"message":"texto curto","executions":[{"executionId":1,"source": <CODIGO_LUAU>}]}.',
+      'IMPORTANTE sobre `source`: entregue o código Luau dentro de um bloco Lua long bracket [=[ ... ]=] como valor de `source` (PREFERIDO — evita erros de escape de JSON), ou então como string JSON escapada. NUNCA use string multiline comum entre aspas. `message` continua sendo string JSON normal.',
+      'Mantenha `message` curta quando o source for grande.',
       'Resolva todos os pontos explicitos do pedido do usuario. Se houver varios subpedidos, a message deve resumir cada um de forma curta, clara e completa.',
       compactContext.summary,
     ].join('\n\n');
   }
 
-  static async runThinkSelection(intent, context, intentProfile, thinkModel) {
+  static buildSkippedExplorerSelection(reason) {
+    return {
+      needExplorer: false,
+      includeAll: false,
+      includePaths: [],
+      includeClasses: [],
+      includeChildrenDepth: 0,
+      includeParentChain: false,
+      includeScriptSource: false,
+      reason: reason || 'Explorer dispensado.',
+    };
+  }
+
+  static async runThinkSelection(intent, context, intentProfile, thinkModel, telemetrySink) {
     const prompt = [
       'Analise o pedido e decida qual parte do explorer seria realmente necessaria para responder com alta qualidade e baixo custo.',
       'Nao receba o explorer agora. Decida apenas a selecao.',
@@ -537,6 +598,10 @@ export class AgentOrchestrator {
       maxTokens: 260,
       temperature: 0.1,
     });
+
+    if (Array.isArray(telemetrySink)) {
+      this.pushUsageTelemetry(telemetrySink, 'think-select', response);
+    }
 
     return this.parseExplorerSelection(response.text, context.project?.selectedNodePath || null);
   }
@@ -606,7 +671,7 @@ export class AgentOrchestrator {
       model: reviewModel,
       systemPrompt:
         'Você é um agente de reparo executor. Responda somente em JSON puro no formato {"message":"texto","executions":[{"executionId":1,"source":"conteudo"}]}. Use a resposta parseada anterior como base canonica da correcao. Preserve o mesmo executionId e a mesma estrutura sempre que possivel, alterando apenas o necessario para corrigir. A resposta inteira deve ser JSON valido estrito. Escape corretamente quotes, barras e quebras de linha. Prefira uma unica execution com um unico source Luau livre e return verificavel. Se o source criar scripts e atribuir `.Source`, use long brackets [=[...]=] ou table.concat no source embutido e confira aspas, parenteses e blocos antes de responder. Mantenha a message curta quando o source for grande, mas faca a nova message explicar o que foi corrigido e o que a execucao entrega agora. So use JSON com action/payload ou legacy plugin_call como fallback de compatibilidade. Corrija a resposta para que o agente realmente crie, edite e reorganize o projeto quando isso foi pedido.',
-      maxTokens: intentProfile.executionMode === 'deep' ? 5000 : 1800,
+      maxTokens: 8000,
       temperature: intentProfile.executionMode === 'deep' ? 0.4 : 0.2,
     });
     this.pushUsageTelemetry(telemetryStages, 'repair', review);
@@ -659,7 +724,7 @@ export class AgentOrchestrator {
       model: reviewModel,
       systemPrompt:
         'Você é um validador final de execucao. Responda somente em JSON puro no formato {"message":"texto","executions":[{"executionId":1,"source":"conteudo"}]}. Use a resposta parseada anterior como base canonica. Preserve o mesmo executionId e a mesma estrutura sempre que possivel. A resposta inteira deve ser JSON valido estrito. Escape corretamente quotes, barras e quebras de linha. O formato principal da execution deve ser source livre em Luau. Se houver falha de sintaxe, logica ou aderencia, reescreva a execucao completa corrigida mantendo o mesmo formato. Se houver scripts embutidos via `.Source`, use long brackets [=[...]=] ou table.concat. Mantenha a message curta quando o source for grande, mas faca a nova message explicar o que foi validado ou corrigido. Nunca devolva apenas trecho de patch.',
-      maxTokens: intentProfile.executionMode === 'deep' ? 5000 : 1800,
+      maxTokens: 8000,
       temperature: intentProfile.executionMode === 'deep' ? 0.4 : 0.2,
     });
     this.pushUsageTelemetry(telemetryStages, 'preflight', preflight);
@@ -842,6 +907,11 @@ export class AgentOrchestrator {
   }
 
   static tryBuildLocalExecutionPlan(intent, context, intentProfile) {
+    // Desativado: templates fixos (pirâmide/rua/cubo/esfera) sequestravam o pedido
+    // por palavra-chave e produziam resultados rígidos/errados. Tudo passa pelo
+    // modelo agora, para qualidade consistente (objetivo "parecido com o Claude").
+    return null;
+    // eslint-disable-next-line no-unreachable
     if (intentProfile.taskType !== 'roblox_code') return null;
 
     const normalized = String(intent || '').toLowerCase();
@@ -1215,12 +1285,11 @@ export class AgentOrchestrator {
       if (sourceKeyIndex === -1) break;
 
       const sourceColonIndex = text.indexOf(':', sourceKeyIndex);
-      const sourceQuoteIndex = text.indexOf('"', sourceColonIndex + 1);
-      if (sourceColonIndex === -1 || sourceQuoteIndex === -1) break;
+      if (sourceColonIndex === -1) break;
 
-      const sourceToken =
-        this.readLooseJsonTailString(text, sourceQuoteIndex, ['","executionId"', '"}]', '"}', '}]}']) ||
-        this.readJsonLikeString(text, sourceQuoteIndex);
+      // O modelo frequentemente entrega o source como bloco Lua [=[ ... ]=] ou cerca
+      // ```lua em vez de string JSON escapada — aceitamos os três formatos.
+      const sourceToken = this.readSourceValue(text, sourceColonIndex + 1);
       if (!sourceToken) break;
 
       executions.push({
@@ -1241,6 +1310,69 @@ export class AgentOrchestrator {
       message: messageToken.value,
       executions,
     };
+  }
+
+  static matchLuaLongBracketOpen(text, pos) {
+    if (text[pos] !== '[') return null;
+    let i = pos + 1;
+    let level = 0;
+    while (text[i] === '=') {
+      level += 1;
+      i += 1;
+    }
+    if (text[i] === '[') {
+      return { level, contentStart: i + 1, closer: `]${'='.repeat(level)}]` };
+    }
+    return null;
+  }
+
+  /**
+   * Lê o valor de `source` aceitando três formatos que os modelos produzem:
+   *  1. Bloco Lua long bracket:  [=[ ... ]=]  ou  [[ ... ]]
+   *  2. Cerca de código:         ```lua ... ```  (ou ```luau / ``` )
+   *  3. String JSON escapada:    "local x = ..."
+   * Retorna { value, nextIndex } ou null.
+   */
+  static readSourceValue(text, startIndex) {
+    let i = startIndex;
+    while (i < text.length && /\s/.test(text[i])) i += 1;
+    if (i >= text.length) return null;
+
+    const ch = text[i];
+
+    // 1. Bloco Lua long bracket
+    if (ch === '[') {
+      const lb = this.matchLuaLongBracketOpen(text, i);
+      if (lb) {
+        const close = text.indexOf(lb.closer, lb.contentStart);
+        if (close !== -1) {
+          return {
+            value: text.slice(lb.contentStart, close).replace(/^\r?\n/, ''),
+            nextIndex: close + lb.closer.length,
+          };
+        }
+      }
+    }
+
+    // 2. Cerca de código (```lua ... ```)
+    if (text.startsWith('```', i)) {
+      const lineEnd = text.indexOf('\n', i);
+      const contentStart = lineEnd === -1 ? i + 3 : lineEnd + 1;
+      const close = text.indexOf('```', contentStart);
+      if (close !== -1) {
+        return { value: text.slice(contentStart, close).trim(), nextIndex: close + 3 };
+      }
+    }
+
+    // 3. String JSON escapada
+    if (ch === '"') {
+      return (
+        this.readLooseJsonTailString(text, i, ['","executionId"', '"}]', '"}', '}]}']) ||
+        this.readJsonLikeString(text, i)
+      );
+    }
+
+    return null;
   }
 
   static readJsonLikeString(text, openingQuoteIndex) {
@@ -1424,6 +1556,340 @@ export class AgentOrchestrator {
     }
 
     return '';
+  }
+
+  static getCommandLuauSource(command) {
+    if (!command || typeof command.payload !== 'object') return null;
+    if (command.action === 'RunLuau' || command.action === 'CreateScript') {
+      return typeof command.payload.source === 'string' ? command.payload.source : null;
+    }
+    return null;
+  }
+
+  static withCommandSource(command, source) {
+    return { ...command, payload: { ...(command.payload || {}), source } };
+  }
+
+  static extractLuauFromText(text) {
+    const trimmed = String(text || '').trim();
+    if (!trimmed) return null;
+    const fenced = trimmed.match(/```(?:luau|lua)?\s*([\s\S]*?)```/i);
+    if (fenced?.[1]?.trim()) return fenced[1].trim();
+    return trimmed;
+  }
+
+  /**
+   * Conserta apenas a sintaxe de um source Luau, preservando a lógica. Uma única
+   * chamada de modelo, focada. Retorna o source corrigido ou null se falhar.
+   */
+  static async repairLuauSource(source, errorSummary, model, telemetrySink) {
+    const prompt = [
+      'Corrija APENAS os erros de sintaxe do código Luau abaixo, preservando exatamente a mesma lógica e intenção.',
+      `Problemas detectados pelo validador: ${errorSummary || 'sintaxe inválida'}.`,
+      'Regras obrigatórias:',
+      '- Feche todos os blocos function/if/for/while/do com o `end` correspondente.',
+      '- Balanceie (), {} e [].',
+      '- Para `.Source` de Script/LocalScript/ModuleScript embutido use long brackets [=[ ... ]=] ou table.concat — nunca string multiline comum entre aspas.',
+      '- Não trunque o código; devolva-o completo.',
+      'Responda SOMENTE com o código Luau corrigido, sem explicação e sem cercas de código (```).',
+      '',
+      source,
+    ].join('\n');
+
+    const response = await ModelRouter.generateResponse(prompt, {
+      model,
+      systemPrompt: 'Você é um linter/reparador de Luau. Devolve apenas o código corrigido, nada mais.',
+      maxTokens: 8000,
+      temperature: 0.1,
+    });
+
+    if (Array.isArray(telemetrySink)) {
+      this.pushUsageTelemetry(telemetrySink, 'luau-repair', response);
+    }
+    if (!response || response.success === false) return null;
+    return this.extractLuauFromText(response.text);
+  }
+
+  /**
+   * Portão final de qualidade: valida cada execução Luau e tenta um autorreparo.
+   * Garante que NUNCA seja enfileirado código com erro de sintaxe definitivo
+   * (string/bracket aberto, truncamento). Heurística de blocos só dispara reparo;
+   * nunca bloqueia sozinha (evita falso positivo).
+   *
+   * Retorna { commands, report, rejected }.
+   */
+  static async validateAndRepairExecutions(commands, options = {}) {
+    const { reviewModel, telemetrySink } = options;
+    const out = [];
+    const report = { checked: 0, repaired: 0, rejected: 0, details: [] };
+    let rejected = false;
+
+    for (const command of Array.isArray(commands) ? commands : []) {
+      const source = this.getCommandLuauSource(command);
+      if (source == null) {
+        out.push(command);
+        continue;
+      }
+
+      report.checked += 1;
+      const first = LuauValidator.validate(source);
+      if (first.ok) {
+        out.push(command);
+        continue;
+      }
+
+      this.logDebug('validate:issues', {
+        action: command.action,
+        hardErrors: first.hardErrors,
+        softWarnings: first.softWarnings,
+      });
+
+      const repairedSource = await this.repairLuauSource(
+        source,
+        [...first.hardErrors, ...first.softWarnings].join(' '),
+        reviewModel,
+        telemetrySink
+      );
+      const second = repairedSource
+        ? LuauValidator.validate(repairedSource)
+        : { ok: false, hardErrors: ['Reparo automático não retornou código.'], softWarnings: [] };
+
+      // O reparo melhorou? (sem hard errors, ou pelo menos resolveu os hard errors originais)
+      const repairImproved =
+        repairedSource && (second.ok || (second.hardErrors.length === 0 && first.hardErrors.length > 0));
+
+      if (repairImproved) {
+        report.repaired += 1;
+        out.push(this.withCommandSource(command, repairedSource));
+        continue;
+      }
+
+      // Hard error persistente em ambos → código quebrado de verdade: NÃO enfileira.
+      if (first.hardErrors.length > 0 && (!second || second.hardErrors.length > 0)) {
+        report.rejected += 1;
+        rejected = true;
+        report.details.push({ action: command.action, errors: first.hardErrors });
+        continue;
+      }
+
+      // Só warnings de bloco (possível falso positivo) → confia no modelo, enfileira original.
+      out.push(command);
+    }
+
+    return { commands: out, report, rejected };
+  }
+
+  // ─── Loop agêntico multi-passo ──────────────────────────────────────────────
+
+  static summarizeWorkspaceForAgent(nodes, cap = 40) {
+    const lines = [];
+    const walk = (list, depth) => {
+      for (const node of Array.isArray(list) ? list : []) {
+        if (lines.length >= cap) return;
+        const props = node?.propriedades || {};
+        lines.push(`${props.Path || node?.nome || 'node'} (${props.ClassName || 'Instance'})`);
+        if (depth > 0) walk(node?.filhos, depth - 1);
+      }
+    };
+    walk(nodes, 2);
+    return lines.slice(0, cap).join('\n');
+  }
+
+  static buildAgentStepPrompt({ goal, project, history, currentPlan, attemptsOnCurrent, lastStepFailed, lastError }) {
+    const historyText = (history || [])
+      .slice(-8)
+      .map(
+        (h) =>
+          `#${h.stepIndex} [${h.status}] ${h.action}: ${this.limit(h.resultSummary || '-', 200)}\n  source: ${this.limit(h.sourcePreview || '', 240)}`
+      )
+      .join('\n');
+    const workspace = this.summarizeWorkspaceForAgent(project?.workspaceNodes || []);
+    const planText =
+      Array.isArray(currentPlan) && currentPlan.length > 0
+        ? currentPlan.map((t) => `- [${t.status}] ${t.title}`).join('\n')
+        : '(ainda NÃO existe lista de tarefas — crie uma agora a partir do objetivo)';
+
+    return [
+      `Objetivo do usuário: ${goal}`,
+      project?.name ? `Projeto: ${project.name} (PlaceId ${project.placeId || '-'})` : '',
+      workspace ? `Estado atual do workspace (parcial, sincronizado do Studio):\n${workspace}` : 'Workspace vazio ou ainda não sincronizado.',
+      `Lista de tarefas (to-do) atual:\n${planText}`,
+      history && history.length > 0
+        ? `Passos já executados e seus resultados REAIS:\n${historyText}`
+        : 'Nenhum passo executado ainda — este é o primeiro passo do objetivo.',
+      lastStepFailed
+        ? `⚠️ O último passo FALHOU: ${lastError || 'erro desconhecido'}. NÃO marque essa tarefa como "done". Gere uma versão CORRIGIDA da MESMA tarefa, levando o erro em conta (tentativa ${attemptsOnCurrent || 1}). Não pule para a próxima tarefa enquanto esta não funcionar.`
+        : '',
+      'SUA FUNÇÃO a cada passo:',
+      '1. Manter e ATUALIZAR a lista de tarefas. Se ainda não existe, DECOMPONHA o objetivo numa lista ordenada de tarefas concretas e pequenas (ex.: criar pasta/estrutura → criar partes → criar RemoteEvents → script servidor → script cliente → UI...). Pense do zero e organize tudo.',
+      '2. Atualizar o status de cada tarefa ("pending"/"doing"/"done"/"failed") com base no RESULTADO REAL. Só marque "done" se o resultado confirmar sucesso.',
+      '3. Escolher o ÚNICO próximo passo executável: a próxima tarefa "pending", ou a CORREÇÃO da tarefa que falhou.',
+      '4. Declarar done=true SOMENTE quando TODAS as tarefas estiverem "done".',
+      'Responda SOMENTE em JSON: {"plan":[{"title":"...","status":"done|doing|pending|failed"}],"done":false,"message":"o que este passo faz","execution":{"executionId":1,"source": <CODIGO_LUAU>}}',
+      'Quando tudo estiver concluído: {"plan":[...todas done...],"done":true,"message":"resumo final","execution":null}.',
+      'O `source` pode vir como bloco Lua long bracket [=[ ... ]=] (PREFERIDO, evita erros de escape) ou string JSON escapada. NUNCA string multiline comum entre aspas. Luau auto-contido, executável de uma vez. NÃO repita tarefas já "done".',
+      ROBLOX_QUALITY_RULES,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  static normalizeAgentPlan(rawPlan) {
+    if (!Array.isArray(rawPlan)) return null;
+    const allowed = ['pending', 'doing', 'done', 'failed'];
+    const plan = rawPlan.slice(0, 25).map((item, index) => {
+      if (typeof item === 'string') {
+        return { id: index + 1, title: this.limit(item, 160), status: 'pending' };
+      }
+      const title =
+        typeof item?.title === 'string'
+          ? item.title
+          : typeof item?.task === 'string'
+            ? item.task
+            : `Tarefa ${index + 1}`;
+      const status = allowed.includes(item?.status) ? item.status : 'pending';
+      return { id: index + 1, title: this.limit(title, 160), status };
+    });
+    return plan.length > 0 ? plan : null;
+  }
+
+  /**
+   * Decide o próximo passo de um loop agêntico a partir do objetivo + resultados
+   * reais já observados. Retorna { done, message, execution|null, truncated }.
+   */
+  static async planNextAgentStep(args, telemetrySink) {
+    const { model, executionMode } = args;
+    const prompt = this.buildAgentStepPrompt(args);
+
+    const response = await ModelRouter.generateResponse(prompt, {
+      model,
+      systemPrompt:
+        'Você é um agente autônomo de engenharia Roblox executando um objetivo passo a passo dentro do Studio. Você MANTÉM uma lista de tarefas (to-do), vê o resultado REAL de cada passo e decide o próximo. Responda SEMPRE em JSON puro estrito {"plan":[{"title":string,"status":string}],"done":boolean,"message":string,"execution":{"executionId":number,"source":string}|null}. Um passo por vez, sem texto fora do JSON.',
+      maxTokens: 8000,
+      temperature: executionMode === 'deep' ? 0.4 : 0.2,
+    });
+
+    if (Array.isArray(telemetrySink)) {
+      this.pushUsageTelemetry(telemetrySink, 'agent-step', response);
+    }
+
+    const fallbackPlan = Array.isArray(args.currentPlan) ? args.currentPlan : null;
+
+    if (!response || response.success === false) {
+      return {
+        done: true,
+        message: 'O agente não conseguiu planejar o próximo passo (falha do modelo). Encerrando o loop com segurança.',
+        execution: null,
+        plan: fallbackPlan,
+        error: true,
+      };
+    }
+
+    const decision = this.parseAgentDecision(response.text, fallbackPlan);
+    if (!decision) {
+      return {
+        done: true,
+        message: this.limit(response.text || 'Resposta do agente ilegível.', 400),
+        execution: null,
+        plan: fallbackPlan,
+        error: true,
+      };
+    }
+
+    // Truncou no meio do source → não confia nesse passo.
+    if (decision.execution && response.truncated) {
+      return { ...decision, execution: null, truncated: true };
+    }
+
+    return { ...decision, truncated: false };
+  }
+
+  // Localiza um bloco de Luau (cerca ```lua OU long bracket [=[ ... ]=]) e devolve
+  // sua posição + conteúdo. Usa o bloco que aparecer primeiro no texto.
+  static matchLuauBlockWithRange(text) {
+    const t = String(text || '');
+    const candidates = [];
+
+    const fence = t.match(/```(?:luau|lua)?\s*[\s\S]*?```/i);
+    if (fence && typeof fence.index === 'number') {
+      const inner = fence[0].replace(/^```(?:luau|lua)?[^\n]*\n?/i, '').replace(/```\s*$/, '').trim();
+      candidates.push({ start: fence.index, end: fence.index + fence[0].length, code: inner });
+    }
+
+    const longBracket = t.match(/\[(=*)\[([\s\S]*?)\]\1\]/);
+    if (longBracket && typeof longBracket.index === 'number') {
+      candidates.push({
+        start: longBracket.index,
+        end: longBracket.index + longBracket[0].length,
+        code: longBracket[2].replace(/^\r?\n/, ''),
+      });
+    }
+
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => a.start - b.start);
+    return candidates[0];
+  }
+
+  static shapeAgentDecision(obj, fallbackPlan) {
+    const plan = this.normalizeAgentPlan(obj.plan) || fallbackPlan;
+    const done = obj.done === true;
+    const message =
+      typeof obj.message === 'string' && obj.message.trim()
+        ? obj.message.trim()
+        : done
+          ? 'Objetivo concluído.'
+          : 'Próximo passo.';
+    let execution = null;
+    if (!done && obj.execution && typeof obj.execution.source === 'string' && obj.execution.source.trim()) {
+      execution = { executionId: Number(obj.execution.executionId) || 1, source: obj.execution.source };
+    }
+    return { done, message, execution, plan };
+  }
+
+  /**
+   * Parser robusto do envelope do passo do agente. Preserva `plan`/`done`/`message`
+   * mesmo quando o `source` vem como bloco Lua [=[ ... ]=] (que invalida o JSON):
+   * extrai o bloco, troca por um placeholder JSON, parseia o resto e reinjeta o código.
+   */
+  static parseAgentDecision(rawText, fallbackPlan) {
+    const text = String(rawText || '');
+
+    // 1) JSON direto (source como string escapada).
+    try {
+      const obj = JSON.parse(this.extractJsonObject(text));
+      if (obj && typeof obj === 'object') return this.shapeAgentDecision(obj, fallbackPlan);
+    } catch {}
+
+    // 2) Há um bloco de código → extrai, neutraliza no texto e parseia o resto.
+    const block = this.matchLuauBlockWithRange(text);
+    if (block) {
+      const neutralized = `${text.slice(0, block.start)}"__BLOXAI_CODE__"${text.slice(block.end)}`;
+      try {
+        const obj = JSON.parse(this.extractJsonObject(neutralized));
+        if (obj && typeof obj === 'object') {
+          if (obj.execution && typeof obj.execution === 'object') obj.execution.source = block.code;
+          else if (obj.done !== true) obj.execution = { executionId: 1, source: block.code };
+          return this.shapeAgentDecision(obj, fallbackPlan);
+        }
+      } catch {}
+      // 3) Não deu para recuperar o JSON, mas temos o código → usa como passo único.
+      return { done: false, message: 'Próximo passo.', execution: { executionId: 1, source: block.code }, plan: fallbackPlan };
+    }
+
+    return null;
+  }
+
+  static extractFencedLuau(text) {
+    const match = String(text || '').match(/```(?:luau|lua)\s*([\s\S]*?)```/i);
+    return match?.[1]?.trim() || null;
+  }
+
+  // Extrai um bloco de Luau de uma cerca ```lua OU de um long bracket Lua [=[ ... ]=].
+  static extractAnyLuauBlock(text) {
+    const fenced = this.extractFencedLuau(text);
+    if (fenced) return fenced;
+    const longBracket = String(text || '').match(/\[(=*)\[([\s\S]*?)\]\1\]/);
+    return longBracket?.[2]?.trim() || null;
   }
 
   static compileExecutionsToCommands(executions) {

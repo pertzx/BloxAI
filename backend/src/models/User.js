@@ -18,6 +18,11 @@ const userSchema = new mongoose.Schema({
   recoveryToken: { type: String, default: null, select: false },
   recoveryTokenExpires: { type: Date, default: null },
 
+  // ── Chave de pareamento do plugin (nível de conta) ────────────────────────
+  // Copiada no dashboard web e colada no plugin. O plugin cria/conecta projetos
+  // automaticamente pelo Place ID detectado, sem precisar criar projeto antes.
+  pluginKey: { type: String, default: null, unique: true, sparse: true, select: false },
+
   // ── Plano e role ──────────────────────────────────────────────────────────
   // planKey referencia Plan.key (config dinâmica). `plan` guarda o nome de exibição.
   planKey: { type: String, default: 'free' },
