@@ -1,12 +1,10 @@
-import { DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY } from '../config/env.js';
+import { ModelRegistry } from '../services/ModelRegistry.js';
 
 export class ModelRouter {
+  // Modelos disponíveis = os habilitados pelo admin cujo provedor tem chave no .env.
   static getAvailableModels() {
-    const models = [];
-    if (DEEPSEEK_API_KEY) models.push('DeepSeek-V3');
-    if (OPENAI_API_KEY) models.push('GPT-5.4 Mini');
-    if (ANTHROPIC_API_KEY) models.push('Claude 3.5');
-    return models;
+    const labels = ModelRegistry.availableLabels();
+    return labels.length > 0 ? labels : (ModelRegistry.defaultLabel() ? [ModelRegistry.defaultLabel()] : []);
   }
 
   static async generateResponse(
@@ -19,19 +17,19 @@ export class ModelRouter {
         ? { model: modelOrOptions, systemPrompt }
         : { ...modelOrOptions, systemPrompt: modelOrOptions.systemPrompt || systemPrompt };
 
-    const preferred = this.normalizePreferredModel(options.model) || 'DeepSeek-V3';
+    const preferred = this.normalizePreferredModel(options.model) || ModelRegistry.defaultLabel() || 'DeepSeek-V3';
     const chain = this.buildModelFallbackChain(preferred);
     let lastError = null;
 
     for (let idx = 0; idx < chain.length; idx += 1) {
       const routedModel = this.resolveModelLabel(chain[idx]);
-      if (idx === 0) console.log(`[ModelRouter] Roteando para: ${routedModel.label}`);
+      if (idx === 0) console.log(`[ModelRouter] Roteando para: ${routedModel.label} (${routedModel.provider})`);
       else console.warn(`[ModelRouter] Fallback → ${routedModel.label} (anterior falhou)`);
 
       try {
-        if (routedModel.provider === 'anthropic') {
+        if (routedModel.kind === 'anthropic') {
           return await this.callAnthropic(
-            ANTHROPIC_API_KEY,
+            process.env[routedModel.envKey],
             routedModel.apiModel,
             prompt,
             options.systemPrompt || systemPrompt,
@@ -40,15 +38,9 @@ export class ModelRouter {
           );
         }
 
-        const apiKey = routedModel.label === 'GPT-5.4 Mini' ? OPENAI_API_KEY : DEEPSEEK_API_KEY;
-        const url =
-          routedModel.label === 'GPT-5.4 Mini'
-            ? 'https://api.openai.com/v1/chat/completions'
-            : 'https://api.deepseek.com/v1/chat/completions';
-
         return await this.callOpenAICompatible(
-          url,
-          apiKey,
+          routedModel.baseUrl,
+          process.env[routedModel.envKey],
           routedModel.apiModel,
           prompt,
           options.systemPrompt || systemPrompt,
@@ -69,68 +61,24 @@ export class ModelRouter {
     };
   }
 
+  // Seleção de modelo por estágio. Com o registro dinâmico, usamos o modelo
+  // escolhido pelo usuário (se disponível) ou o padrão configurado pelo admin.
   static selectModel(options = {}) {
     const preferred = this.normalizePreferredModel(options.preferredModel);
     if (preferred) return preferred;
-
-    const stage = options.stage || 'generate';
-    const taskType = options.taskType || 'generic';
-    const executionMode = options.executionMode || 'fast';
-    const riskLevel = options.riskLevel || 'low';
-
-    if (stage === 'classify' || stage === 'summarize') return 'DeepSeek-V3';
-    if (stage === 'review') {
-      if (riskLevel === 'high') return 'Claude 3.5';
-      if (riskLevel === 'medium') return 'GPT-5.4 Mini';
-      return 'DeepSeek-V3';
-    }
-
-    if (taskType === 'review') return 'Claude 3.5';
-    if (taskType === 'architecture' || taskType === 'debug') {
-      return executionMode === 'deep' || riskLevel !== 'low' ? 'GPT-5.4 Mini' : 'DeepSeek-V3';
-    }
-    if (taskType === 'ui_frontend') {
-      return executionMode === 'deep' ? 'GPT-5.4 Mini' : 'DeepSeek-V3';
-    }
-
-    return riskLevel === 'high' ? 'GPT-5.4 Mini' : 'DeepSeek-V3';
+    return ModelRegistry.defaultLabel() || this.getAvailableModels()[0] || 'DeepSeek-V3';
   }
 
+  // Retorna o label canônico se o modelo existir/estiver disponível no registro.
   static normalizePreferredModel(model) {
     if (!model) return null;
-    const normalized = model.toLowerCase();
-    if (normalized.includes('claude')) return 'Claude 3.5';
-    if (normalized.includes('gpt')) return 'GPT-5.4 Mini';
-    if (normalized.includes('deepseek')) return 'DeepSeek-V3';
-    return null;
+    const found = ModelRegistry.findByLabel(model);
+    return found ? found.label : null;
   }
 
+  // Resolve um label para { label, provider, kind, apiModel, baseUrl, envKey, pricing }.
   static resolveModelLabel(model) {
-    const normalized = this.normalizePreferredModel(model) || 'DeepSeek-V3';
-
-    if (normalized === 'Claude 3.5') {
-      return {
-        label: 'Claude 3.5',
-        provider: 'anthropic',
-        // Override por env (ANTHROPIC_MODEL) — default é um modelo real válido.
-        apiModel: process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20240620',
-      };
-    }
-
-    if (normalized === 'GPT-5.4 Mini') {
-      return {
-        label: 'GPT-5.4 Mini',
-        provider: 'openai-compatible',
-        // 'gpt-5.4-mini' NÃO existe na OpenAI. Default real + override por env (OPENAI_MODEL).
-        apiModel: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-      };
-    }
-
-    return {
-      label: 'DeepSeek-V3',
-      provider: 'openai-compatible',
-      apiModel: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
-    };
+    return ModelRegistry.resolve(model);
   }
 
   /**
@@ -160,7 +108,7 @@ export class ModelRouter {
         ? { model: modelOrOptions }
         : { ...modelOrOptions };
 
-    const preferred = this.normalizePreferredModel(options.model) || 'DeepSeek-V3';
+    const preferred = this.normalizePreferredModel(options.model) || ModelRegistry.defaultLabel() || 'DeepSeek-V3';
     const chain = this.buildModelFallbackChain(preferred);
     const systemPrompt = options.systemPrompt || 'Você é um assistente de IA focado em desenvolvimento para Roblox Studio.';
     let lastError = null;
@@ -172,13 +120,13 @@ export class ModelRouter {
 
     for (let idx = 0; idx < chain.length; idx += 1) {
       const routedModel = this.resolveModelLabel(chain[idx]);
-      if (idx === 0) console.log(`[ModelRouter] Stream para: ${routedModel.label}`);
+      if (idx === 0) console.log(`[ModelRouter] Stream para: ${routedModel.label} (${routedModel.provider})`);
       else console.warn(`[ModelRouter] Fallback de stream → ${routedModel.label}`);
 
       try {
-        if (routedModel.provider === 'anthropic') {
+        if (routedModel.kind === 'anthropic') {
           return await this.streamAnthropic(
-            ANTHROPIC_API_KEY,
+            process.env[routedModel.envKey],
             routedModel.apiModel,
             prompt,
             systemPrompt,
@@ -188,15 +136,9 @@ export class ModelRouter {
           );
         }
 
-        const apiKey = routedModel.label === 'GPT-5.4 Mini' ? OPENAI_API_KEY : DEEPSEEK_API_KEY;
-        const url =
-          routedModel.label === 'GPT-5.4 Mini'
-            ? 'https://api.openai.com/v1/chat/completions'
-            : 'https://api.deepseek.com/v1/chat/completions';
-
         return await this.streamOpenAICompatible(
-          url,
-          apiKey,
+          routedModel.baseUrl,
+          process.env[routedModel.envKey],
           routedModel.apiModel,
           prompt,
           systemPrompt,
@@ -372,7 +314,7 @@ export class ModelRouter {
     return {
       success: true,
       text: fullText,
-      model: 'Claude 3.5',
+      model: this.resolveModelLabel(modelName).label,
       finishReason: stopReason,
       truncated: stopReason === 'max_tokens',
       usage: this.buildUsageSummary(routedModel, inputTokens, outputTokens, prompt, fullText),
@@ -463,7 +405,7 @@ export class ModelRouter {
     return {
       success: true,
       text: outputText,
-      model: 'Claude 3.5',
+      model: this.resolveModelLabel(modelName).label,
       finishReason: data?.stop_reason || null,
       truncated: data?.stop_reason === 'max_tokens',
       usage: this.buildUsageSummary(
@@ -493,18 +435,16 @@ export class ModelRouter {
     return Math.max(1, Math.ceil(String(text || '').length / 4));
   }
 
+  // Pricing vem do registro (configurado pelo admin por modelo). Fallback conservador.
   static estimateCostUsd(model, inputTokens, outputTokens) {
-    const pricing =
-      model === 'GPT-5.4 Mini'
-        ? { inputPerMillion: 5, outputPerMillion: 15 }
-        : model === 'Claude 3.5'
-          ? { inputPerMillion: 3, outputPerMillion: 15 }
-          : { inputPerMillion: 0.27, outputPerMillion: 1.1 };
+    const resolved = ModelRegistry.resolve(model);
+    const inputPerMillion = Number(resolved?.inputPer1M) > 0 ? Number(resolved.inputPer1M) : 1;
+    const outputPerMillion = Number(resolved?.outputPer1M) > 0 ? Number(resolved.outputPer1M) : 3;
 
     return Number(
       (
-        (inputTokens / 1_000_000) * pricing.inputPerMillion +
-        (outputTokens / 1_000_000) * pricing.outputPerMillion
+        (inputTokens / 1_000_000) * inputPerMillion +
+        (outputTokens / 1_000_000) * outputPerMillion
       ).toFixed(6)
     );
   }

@@ -2,28 +2,23 @@ import { ModelRouter } from './ModelRouter.js';
 import { LuauValidator } from './LuauValidator.js';
 
 const PLUGIN_DOC_CAPSULE = `
-Blox AI plugin documentation capsule:
-- The plugin is not a chatbot. It is the local executor and sensor inside Roblox Studio.
-- The plugin sees the current DataModel snapshot and executes structured commands one by one.
-- The plugin must be treated as the master executor of the Roblox project when the user asks for a change.
-- The plugin consumes one command at a time from the backend queue, reports result, then fetches the next command.
-- The AI should return executable Luau source directly as the primary execution format whenever possible.
-- JSON with action/payload and legacy plugin_call are only compatibility fallbacks for cases where free source cannot be represented safely otherwise.
-- The AI is allowed to create scripts, edit script source, create parts, create instances, reorganize hierarchy, and generate full systems through the command it returns.
-- The AI should behave like the owner of the workspace execution flow, not like a tutor explaining what the user should do manually.
-- Preferred free execution format:
-  {"executionId":1,"source":"local p = Instance.new('Part')\\np.Anchored = true\\np.Position = Vector3.new(0,5,0)\\np.Parent = workspace"}
-- Prefer a single executionId with one self-contained Luau source whenever the task can be completed in one script.
-- When using Luau source, always finish with a return summary table, for example:
-  return { ok = true, summary = "Created 1 part", created = { "workspace.Part" } }
-- Luau generation safety rules:
-  - If the code creates another Script, LocalScript or ModuleScript and assigns '.Source', NEVER use a normal quoted multiline string for that embedded source.
-  - Always use Lua long brackets like '[=[ ... ]=]' for embedded script source, or build the source with 'table.concat'.
-  - Before finalizing, mentally verify all quotes, parentheses, brackets and 'function/end' pairs.
-  - Do not leave unterminated strings, unterminated function calls or truncated blocks.
-- The backend keeps manual approval before execution and preserves raw previews.
-- The AI must return structured output in JSON and only mention execution references using executionId:X.
-- The AI should use the explorer only as context for better execution decisions, not as filler.
+QUEM VOCÊ É E COMO O SEU CÓDIGO VIRA O JOGO:
+- Você é um DESENVOLVEDOR de Roblox de verdade — igual ao usuário. A ÚNICA diferença é que você não usa o mouse no Roblox Studio. Em troca, você está dentro de um PLUGIN: você escreve CÓDIGO Luau que é EXECUTADO no Studio e CRIA O JOGO LITERALMENTE (instâncias, partes, scripts, UI, sons, animações — tudo). Você não ensina o usuário a fazer e não dá tutorial; você FAZ.
+- Fluxo real, ponta a ponta: o usuário descreve o objetivo no chat → você devolve uma ou mais execuções de Luau → o backend valida → o PLUGIN RODA esse Luau dentro do Studio (no servidor) → os objetos passam a existir no jogo de verdade. Ou seja: tudo que você escreve ACONTECE no jogo. Trate cada execução como se você mesmo estivesse construindo o jogo.
+- Imagine como se estivesse DENTRO do jogo: pense no resultado final jogável e construa para chegar nele de forma coerente, não em pedaços soltos.
+- Você pode criar/editar scripts, criar e posicionar partes e instâncias, reorganizar a hierarquia e montar sistemas completos — tudo pelo código que retorna.
+
+PREFERÊNCIAS DE CONSTRUÇÃO:
+- UI: PARA interfaces, nunca crie um localscript que cria a interface, crie diretamente a interface se prescisar de localscript coloque dentro dos arquivos da interface ou do StarterPlayer interface em runtime (em StarterPlayer.StarterPlayerScripts, ou um LocalScript dentro de um ScreenGui em StarterGui) em vez de instanciar a UI "na mão", peça por peça. Assim a UI nasce por código, replica por jogador e já vem com a lógica e os eventos conectados.
+- Lógica de servidor → ServerScriptService. Lógica de cliente → StarterPlayer.StarterPlayerScripts. Módulos e RemoteEvents compartilhados → ReplicatedStorage.
+- Para criar um Script/LocalScript/ModuleScript dentro do seu Luau, atribua \`.Source\` usando long brackets [=[ ... ]=] (NUNCA string multiline comum entre aspas).
+
+COMPLETUDE — REGRA INEGOCIÁVEL:
+- É PROIBIDO deixar qualquer coisa pela metade: nada de função vazia, corpo em branco, "-- TODO", "-- implementar depois", "-- preencher aqui", placeholder, mock, ou lógica comentada para fazer depois. Isso é considerado ERRO GRAVE.
+- ANALISE erros de vulnerabilidade e corrija o mais rapido possivel.
+- Entregue TUDO funcional AGORA — completo, conectado e testável — como um dev sênior que fecha a tarefa inteira numa única entrega. Se começou algo, termina na hora.
+- Quando fizer sentido, finalize o source com um \`return\` de tabela resumo verificável, ex.: return { ok = true, summary = "...", created = { ... } }.
+- Antes de finalizar, confira aspas, parênteses, colchetes e blocos function/end; não deixe strings, chamadas ou blocos truncados.
 `.trim();
 
 const ROBLOX_QUALITY_RULES = [
@@ -33,7 +28,8 @@ const ROBLOX_QUALITY_RULES = [
   '- Configure TODAS as propriedades da instância ANTES de definir `.Parent` (evita replicação parcial e flicker).',
   '- Idempotência: antes de criar algo, cheque com `FindFirstChild` e reutilize/limpe o existente para não duplicar a cada execução.',
   '- Partes estruturais devem ter `Anchored = true`. Dê `Name` significativo a tudo que criar.',
-  '- Use serviços via `game:GetService(...)`. Coloque scripts no container correto (Server em ServerScriptService/dentro do objeto, cliente em StarterPlayerScripts).',
+  '- ORGANIZAÇÃO (obrigatório): NUNCA jogue objetos soltos no workspace. Crie uma Folder/Model raiz nomeada para o sistema (ex.: `workspace.HockeyGame`) e agrupe os elementos relacionados dentro dela em sub-pastas (ex.: Arena, Goals, Spawns). Reaproveite via FindFirstChild se já existir, em vez de duplicar.',
+  '- Coloque cada coisa no lugar certo: scripts de servidor em ServerScriptService (ou dentro do objeto), scripts de cliente em StarterPlayer.StarterPlayerScripts, módulos e RemoteEvents compartilhados em ReplicatedStorage (numa Folder própria). Use serviços via `game:GetService(...)`.',
   '- Código limpo, organizado e completo — nada de placeholder, TODO ou lógica pela metade.',
 ].join('\n');
 
@@ -542,6 +538,30 @@ export class AgentOrchestrator {
         stage: 'review',
       }),
     };
+  }
+
+  // Single-pass: lê o workspace e pede a solução COMPLETA e organizada de uma vez.
+  static buildSolutionPrompt(intent, compactContext, workspaceNodes) {
+    const nodes = Array.isArray(workspaceNodes) ? workspaceNodes : [];
+    const workspace = this.summarizeWorkspaceForAgent(nodes, 220);
+    const hasGame = nodes.some((n) => Array.isArray(n?.filhos) && n.filhos.length > 0);
+
+    return [
+      `Pedido do usuário: ${intent}`,
+      hasGame
+        ? `═══ ESTADO ATUAL DO JOGO (já existe no Studio — LEIA antes de criar QUALQUER coisa) ═══\n${workspace}\n═══════════════════════════════════════════════════════════════`
+        : 'O jogo está praticamente vazio no momento (nada relevante sincronizado).',
+      'REGRA DE OURO — NÃO DUPLIQUE: tudo listado acima JÁ EXISTE. Antes de criar qualquer objeto nomeado, faça `local x = parent:FindFirstChild("Nome")` e REUTILIZE se existir; só crie (`x = x or Instance.new(...)`) o que realmente falta. NUNCA dê `Instance.new` cego de algo que já pode existir — isso polui o jogo com cópias. Se o pedido é "melhorar/terminar", MODIFIQUE o que já existe.',
+      'Você é um engenheiro Roblox sênior. Entregue a SOLUÇÃO COMPLETA do pedido, sem deixar nada pela metade.',
+      'PREFIRA UMA ÚNICA execution Luau totalmente IDEMPOTENTE (rodar de novo NÃO cria duplicata). Se precisar de mais de uma, lembre que elas rodam EM ORDEM — execuções seguintes devem assumir que as anteriores já criaram suas coisas e referenciá-las com FindFirstChild, sem recriar.',
+      'Organize sob uma pasta/Model raiz nomeada; server em ServerScriptService, cliente em StarterPlayer.StarterPlayerScripts, módulos/RemoteEvents em ReplicatedStorage. UI: prefira um LocalScript que monta a interface em runtime.',
+      'Na `message`: resumo curto do que foi feito + 2-3 sugestões de próximos passos.',
+      compactContext.summary,
+      PLUGIN_DOC_CAPSULE,
+      ROBLOX_QUALITY_RULES,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
   }
 
   static buildGeneratorPrompt(intent, compactContext, intentProfile, explorerSelection) {
@@ -1681,21 +1701,55 @@ export class AgentOrchestrator {
 
   // ─── Loop agêntico multi-passo ──────────────────────────────────────────────
 
-  static summarizeWorkspaceForAgent(nodes, cap = 40) {
+  // Mapa do jogo focado em ESTRUTURA: mostra todos os containers/scripts/UI
+  // (o que a IA precisa reaproveitar) e resume massas de partes para não estourar.
+  static summarizeWorkspaceForAgent(nodes, cap = 220) {
+    const STRUCTURAL = new Set([
+      'Folder', 'Model', 'Script', 'LocalScript', 'ModuleScript',
+      'RemoteEvent', 'RemoteFunction', 'BindableEvent', 'BindableFunction',
+      'ScreenGui', 'SurfaceGui', 'BillboardGui', 'Frame', 'ScrollingFrame',
+      'TextButton', 'TextLabel', 'TextBox', 'ImageLabel', 'ImageButton',
+      'Configuration', 'Tool', 'SpawnLocation', 'ProximityPrompt', 'Animation',
+    ]);
     const lines = [];
-    const walk = (list, depth) => {
-      for (const node of Array.isArray(list) ? list : []) {
-        if (lines.length >= cap) return;
+    let count = 0;
+
+    const walk = (list, indent) => {
+      const arr = Array.isArray(list) ? list : [];
+      let leafShown = 0;
+      let leafTotal = 0;
+      for (const node of arr) {
+        if (count >= cap) return;
         const props = node?.propriedades || {};
-        lines.push(`${props.Path || node?.nome || 'node'} (${props.ClassName || 'Instance'})`);
-        if (depth > 0) walk(node?.filhos, depth - 1);
+        const cls = props.ClassName || 'Instance';
+        const name = node?.nome || props.Name || 'node';
+        const kids = Array.isArray(node?.filhos) ? node.filhos : [];
+        const isService = indent === 0;
+        const isStructural = STRUCTURAL.has(cls);
+
+        if (isService || isStructural) {
+          lines.push(`${'  '.repeat(indent)}- ${name} [${cls}]${kids.length ? ` (${kids.length} filhos)` : ''}`);
+          count += 1;
+          if (kids.length) walk(kids, indent + 1);
+        } else {
+          leafTotal += 1;
+          if (leafShown < 4) {
+            lines.push(`${'  '.repeat(indent)}- ${name} [${cls}]`);
+            count += 1;
+            leafShown += 1;
+          }
+        }
+      }
+      if (leafTotal > leafShown) {
+        lines.push(`${'  '.repeat(indent)}- ... (+${leafTotal - leafShown} outros objetos)`);
       }
     };
-    walk(nodes, 2);
+
+    walk(nodes, 0);
     return lines.slice(0, cap).join('\n');
   }
 
-  static buildAgentStepPrompt({ goal, project, history, currentPlan, attemptsOnCurrent, lastStepFailed, lastError }) {
+  static buildAgentStepPrompt({ goal, project, history, currentPlan, attemptsOnCurrent, lastStepFailed, lastError, mustContinueReason }) {
     const historyText = (history || [])
       .slice(-8)
       .map(
@@ -1713,20 +1767,31 @@ export class AgentOrchestrator {
       `Objetivo do usuário: ${goal}`,
       project?.name ? `Projeto: ${project.name} (PlaceId ${project.placeId || '-'})` : '',
       workspace ? `Estado atual do workspace (parcial, sincronizado do Studio):\n${workspace}` : 'Workspace vazio ou ainda não sincronizado.',
+      [
+        'MEMÓRIA E TRABALHO INCREMENTAL (crítico):',
+        '- LEIA o estado do workspace acima e o histórico de passos. Os objetos criados nos passos anteriores JÁ EXISTEM, mesmo que ainda não apareçam no snapshot (o sync é periódico) — confie no histórico.',
+        '- NUNCA recrie a estrutura ou objetos que já existem. NÃO repita `Instance.new` de algo já criado num passo anterior.',
+        '- Antes de criar QUALQUER coisa, use `FindFirstChild`/`WaitForChild` e só crie o que está faltando; caso exista, MODIFIQUE/AJUSTE em vez de recriar.',
+        '- PADRÃO OBRIGATÓRIO ao criar algo nomeado: `local x = parent:FindFirstChild("Nome") or Instance.new(ClassName); x.Name = "Nome"; x.Parent = parent`. Assim o passo é IDEMPOTENTE e NUNCA duplica, mesmo se rodar de novo.',
+        '- Se o objetivo é "melhorar"/"terminar" um jogo que já existe, parta do que está no workspace e ADICIONE/CORRIJA incrementalmente — não comece do zero.',
+        '- Cada passo faz APENAS a próxima tarefa NÃO concluída; jamais refaça tarefas marcadas como "done".',
+      ].join('\n'),
       `Lista de tarefas (to-do) atual:\n${planText}`,
       history && history.length > 0
         ? `Passos já executados e seus resultados REAIS:\n${historyText}`
         : 'Nenhum passo executado ainda — este é o primeiro passo do objetivo.',
       lastStepFailed
-        ? `⚠️ O último passo FALHOU: ${lastError || 'erro desconhecido'}. NÃO marque essa tarefa como "done". Gere uma versão CORRIGIDA da MESMA tarefa, levando o erro em conta (tentativa ${attemptsOnCurrent || 1}). Não pule para a próxima tarefa enquanto esta não funcionar.`
+        ? `⚠️ O último passo FALHOU: ${lastError || 'erro desconhecido'}. NÃO marque essa tarefa como "done" (mantenha "failed"/"doing"). Gere uma versão CORRIGIDA da MESMA tarefa, levando o erro em conta (tentativa ${attemptsOnCurrent || 1}). Não pule para a próxima tarefa enquanto esta não funcionar.`
         : '',
+      mustContinueReason ? `⛔ ${mustContinueReason} NÃO declare done=true; continue executando a próxima tarefa pendente.` : '',
       'SUA FUNÇÃO a cada passo:',
-      '1. Manter e ATUALIZAR a lista de tarefas. Se ainda não existe, DECOMPONHA o objetivo numa lista ordenada de tarefas concretas e pequenas (ex.: criar pasta/estrutura → criar partes → criar RemoteEvents → script servidor → script cliente → UI...). Pense do zero e organize tudo.',
-      '2. Atualizar o status de cada tarefa ("pending"/"doing"/"done"/"failed") com base no RESULTADO REAL. Só marque "done" se o resultado confirmar sucesso.',
-      '3. Escolher o ÚNICO próximo passo executável: a próxima tarefa "pending", ou a CORREÇÃO da tarefa que falhou.',
-      '4. Declarar done=true SOMENTE quando TODAS as tarefas estiverem "done".',
-      'Responda SOMENTE em JSON: {"plan":[{"title":"...","status":"done|doing|pending|failed"}],"done":false,"message":"o que este passo faz","execution":{"executionId":1,"source": <CODIGO_LUAU>}}',
-      'Quando tudo estiver concluído: {"plan":[...todas done...],"done":true,"message":"resumo final","execution":null}.',
+      '1. Manter e ATUALIZAR a lista de tarefas. Se ainda não existe, DECOMPONHA o objetivo numa lista ordenada de tarefas concretas e pequenas. A 1ª tarefa SEMPRE deve criar a ESTRUTURA ORGANIZADA (Folder/Model raiz + sub-pastas: ex. Arena, Goals, Spawns, Remotes). Depois: partes → RemoteEvents → script servidor → script cliente → UI. Pense tudo do zero e organize.',
+      '2. Atualizar o status de cada tarefa com base no RESULTADO REAL do passo anterior: marque "done" o que já foi concluído (veja o histórico), "doing" a atual, "failed" a que falhou. MANTENHA OS MESMOS TÍTULOS das tarefas — só mude o status (e acrescente novas no FIM, se faltar). Devolva a lista COMPLETA.',
+      '3. Escolher o ÚNICO próximo passo executável: a próxima tarefa "pending", ou a CORREÇÃO da que falhou. Coloque tudo DENTRO da estrutura organizada criada na 1ª tarefa.',
+      '4. A `message` DEVE dizer claramente em qual tarefa você está agora (ex.: "Tarefa 2/6: criando os gols").',
+      '5. Declarar done=true SOMENTE quando TODAS as tarefas da lista estiverem "done". Se UMA estiver pending/doing/failed, done=false e você DEVE fornecer a `execution` do próximo passo. NÃO encerre cedo.',
+      'Responda SOMENTE em JSON: {"plan":[{"title":"...","status":"done|doing|pending|failed"}],"done":false,"message":"Tarefa X/Y: ...","execution":{"executionId":1,"source": <CODIGO_LUAU>}}',
+      'Só quando TUDO estiver done: {"plan":[...todas done...],"done":true,"message":"Resumo do que foi construído. Próximos passos sugeridos: 1) ... 2) ... 3) ...","execution":null}. No fim, SEMPRE inclua 2-3 sugestões de próximos passos/melhorias.',
       'O `source` pode vir como bloco Lua long bracket [=[ ... ]=] (PREFERIDO, evita erros de escape) ou string JSON escapada. NUNCA string multiline comum entre aspas. Luau auto-contido, executável de uma vez. NÃO repita tarefas já "done".',
       ROBLOX_QUALITY_RULES,
     ]
@@ -1801,7 +1866,33 @@ export class AgentOrchestrator {
       return { ...decision, execution: null, truncated: true };
     }
 
+    // Não deixa concluir com tarefas pendentes: re-pergunta UMA vez forçando continuar.
+    // Usa o plano canônico do backend (args.currentPlan), não o auto-relato do modelo.
+    const pendingReference = Array.isArray(args.currentPlan) ? args.currentPlan : decision.plan;
+    if (decision.done && this.planHasPending(pendingReference) && !args.__reasked) {
+      const pendingTitles = (pendingReference || [])
+        .filter((t) => t && t.status !== 'done')
+        .map((t) => t.title)
+        .slice(0, 8)
+        .join('; ');
+      return await this.planNextAgentStep(
+        {
+          ...args,
+          __reasked: true,
+          currentPlan: decision.plan || args.currentPlan,
+          lastStepFailed: false,
+          lastError: null,
+          mustContinueReason: `Você tentou concluir, mas ainda há tarefas não-"done": ${pendingTitles}.`,
+        },
+        telemetrySink
+      );
+    }
+
     return { ...decision, truncated: false };
+  }
+
+  static planHasPending(plan) {
+    return Array.isArray(plan) && plan.some((t) => t && t.status !== 'done');
   }
 
   // Localiza um bloco de Luau (cerca ```lua OU long bracket [=[ ... ]=]) e devolve
@@ -1854,29 +1945,89 @@ export class AgentOrchestrator {
   static parseAgentDecision(rawText, fallbackPlan) {
     const text = String(rawText || '');
 
-    // 1) JSON direto (source como string escapada).
+    // 1) JSON direto (source como string escapada bem-formada).
     try {
       const obj = JSON.parse(this.extractJsonObject(text));
       if (obj && typeof obj === 'object') return this.shapeAgentDecision(obj, fallbackPlan);
     } catch {}
 
-    // 2) Há um bloco de código → extrai, neutraliza no texto e parseia o resto.
-    const block = this.matchLuauBlockWithRange(text);
-    if (block) {
-      const neutralized = `${text.slice(0, block.start)}"__BLOXAI_CODE__"${text.slice(block.end)}`;
-      try {
-        const obj = JSON.parse(this.extractJsonObject(neutralized));
-        if (obj && typeof obj === 'object') {
-          if (obj.execution && typeof obj.execution === 'object') obj.execution.source = block.code;
-          else if (obj.done !== true) obj.execution = { executionId: 1, source: block.code };
-          return this.shapeAgentDecision(obj, fallbackPlan);
+    // 2) Extrai o SOURCE de forma tolerante: long bracket [=[ ]=], cerca ```lua, OU
+    //    string JSON "solta" (com quebras de linha/aspas cruas). É RunLuau — não precisa
+    //    "parsear" o código, só pegá-lo. readSourceValue cobre os três formatos.
+    let sourceCode = null;
+    let span = null;
+    const sourceKey = text.indexOf('"source"');
+    if (sourceKey !== -1) {
+      const colon = text.indexOf(':', sourceKey);
+      if (colon !== -1) {
+        const tok = this.readSourceValue(text, colon + 1);
+        if (tok && typeof tok.value === 'string' && tok.value.trim()) {
+          sourceCode = tok.value;
+          span = { start: colon + 1, end: tok.nextIndex };
         }
-      } catch {}
-      // 3) Não deu para recuperar o JSON, mas temos o código → usa como passo único.
-      return { done: false, message: 'Próximo passo.', execution: { executionId: 1, source: block.code }, plan: fallbackPlan };
+      }
+    }
+    if (!sourceCode) {
+      const block = this.matchLuauBlockWithRange(text);
+      if (block) {
+        sourceCode = block.code;
+        span = { start: block.start, end: block.end };
+      }
+    }
+
+    // 3) Recupera plan/done/message. Tenta o JSON com o source trocado por placeholder;
+    //    se falhar, extrai cada campo de forma leniente (não depende do código).
+    let obj = null;
+    if (span) {
+      const neutralized = `${text.slice(0, span.start)}"__BLOXAI_CODE__"${text.slice(span.end)}`;
+      try { obj = JSON.parse(this.extractJsonObject(neutralized)); } catch {}
+    }
+    if (!obj) obj = this.lenientAgentEnvelope(text);
+
+    if (obj) {
+      if (sourceCode) {
+        if (obj.execution && typeof obj.execution === 'object') obj.execution.source = sourceCode;
+        else if (obj.done !== true) obj.execution = { executionId: 1, source: sourceCode };
+      }
+      return this.shapeAgentDecision(obj, fallbackPlan);
+    }
+
+    // 4) Sem envelope recuperável, mas temos o código → passo único.
+    if (sourceCode) {
+      return { done: false, message: 'Próximo passo.', execution: { executionId: 1, source: sourceCode }, plan: fallbackPlan };
     }
 
     return null;
+  }
+
+  // Extrai plan/done/message de um envelope mesmo com JSON malformado (source cru).
+  static lenientAgentEnvelope(text) {
+    const out = {};
+    const doneMatch = String(text).match(/"done"\s*:\s*(true|false)/);
+    if (doneMatch) out.done = doneMatch[1] === 'true';
+
+    const messageKey = text.indexOf('"message"');
+    if (messageKey !== -1) {
+      const colon = text.indexOf(':', messageKey);
+      const quote = colon !== -1 ? text.indexOf('"', colon + 1) : -1;
+      if (quote !== -1) {
+        const tok = this.readJsonLikeString(text, quote);
+        if (tok) out.message = tok.value;
+      }
+    }
+
+    const planKey = text.indexOf('"plan"');
+    if (planKey !== -1) {
+      const bracket = text.indexOf('[', planKey);
+      if (bracket !== -1) {
+        const seg = this.extractBalancedJsonSegment(text, bracket, '[', ']');
+        if (seg) {
+          try { out.plan = JSON.parse(seg); } catch {}
+        }
+      }
+    }
+
+    return Object.keys(out).length > 0 ? out : null;
   }
 
   static extractFencedLuau(text) {

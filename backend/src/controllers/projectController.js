@@ -1,5 +1,6 @@
 import { Project } from '../models/Project.js';
 import { Command } from '../models/Command.js';
+import { ModelRegistry } from '../services/ModelRegistry.js';
 import crypto from 'crypto';
 
 export const getProjects = async (req, res) => {
@@ -118,12 +119,8 @@ export const getProjectDetails = async (req, res) => {
       .select('_id name placeId lastSync status')
       .lean();
 
-    const modelOptions = ['DeepSeek-V3', 'GPT-5.4 Mini', 'Claude 3.5'];
-    const availableModels = modelOptions.filter((model) => {
-      if (model === 'DeepSeek-V3') return Boolean(process.env.DEEPSEEK_API_KEY);
-      if (model === 'GPT-5.4 Mini') return Boolean(process.env.OPENAI_API_KEY);
-      return Boolean(process.env.ANTHROPIC_API_KEY);
-    });
+    // Modelos disponíveis = habilitados pelo admin com chave de provedor configurada.
+    const availableModels = ModelRegistry.availableLabels();
 
     const hasOtherActiveStudioProject =
       latestStudioProject &&

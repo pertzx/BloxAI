@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   Bot, Search, Users, ShieldCheck, AlertTriangle, Ban,
   DollarSign, TrendingUp, ArrowLeft, RefreshCw, X, ChevronDown,
-  Layers, Plus, Pencil, Trash2, Star, Sparkles, Check,
+  Layers, Plus, Pencil, Trash2, Star, Sparkles, Check, Cpu,
 } from 'lucide-react';
 import api from '../api/api.js';
 
@@ -52,6 +52,30 @@ type AdminPlan = {
   isDefault: boolean;
 };
 
+type AiProviderKey = 'openai' | 'anthropic' | 'deepseek';
+
+type AdminAiModel = {
+  _id: string;
+  label: string;
+  provider: AiProviderKey;
+  apiModel: string;
+  description: string;
+  inputPer1M: number;
+  outputPer1M: number;
+  enabled: boolean;
+  isDefault: boolean;
+  order: number;
+  providerConfigured: boolean;
+  available: boolean;
+};
+
+type AiProvider = {
+  provider: AiProviderKey;
+  name: string;
+  envKey: string;
+  configured: boolean;
+};
+
 type Modal =
   | { type: 'topup';  user: AdminUser }
   | { type: 'margin'; user: AdminUser }
@@ -59,9 +83,17 @@ type Modal =
   | { type: 'assign'; user: AdminUser }
   | { type: 'planEditor'; plan: AdminPlan | null }
   | { type: 'planDelete'; plan: AdminPlan }
+  | { type: 'modelEditor'; model: AdminAiModel | null }
+  | { type: 'modelDelete'; model: AdminAiModel }
   | null;
 
-type Tab = 'users' | 'plans';
+type Tab = 'users' | 'plans' | 'models';
+
+const PROVIDER_LABELS: Record<AiProviderKey, string> = {
+  openai: 'OpenAI',
+  anthropic: 'Anthropic (Claude)',
+  deepseek: 'DeepSeek',
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -91,6 +123,8 @@ export default function AdminPage() {
   const [tab, setTab]           = useState<Tab>('users');
   const [users, setUsers]       = useState<AdminUser[]>([]);
   const [plans, setPlans]       = useState<AdminPlan[]>([]);
+  const [models, setModels]     = useState<AdminAiModel[]>([]);
+  const [providers, setProviders] = useState<AiProvider[]>([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState('');
   const [search, setSearch]     = useState('');
@@ -138,14 +172,31 @@ export default function AdminPage() {
     }
   }, []);
 
+  const fetchModels = useCallback(async (quiet = false) => {
+    if (quiet) setRefreshing(true);
+    try {
+      const res = await api.get('/api/billing/admin/models', {
+        headers: { Authorization: `Bearer ${token()}` },
+      });
+      setModels(res.data.models ?? []);
+      setProviders(res.data.providers ?? []);
+      setError('');
+    } catch (e: any) {
+      setError(e?.response?.data?.error ?? 'Falha ao carregar modelos.');
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
+
   useEffect(() => {
     const t = token();
     if (!t || decodeJwtRole(t) !== 'admin') { navigate('/dashboard'); return; }
     fetchUsers();
     fetchPlans();
-  }, [fetchUsers, fetchPlans, navigate]);
+    fetchModels();
+  }, [fetchUsers, fetchPlans, fetchModels, navigate]);
 
-  const refreshAll = useCallback(() => { fetchUsers(true); fetchPlans(true); }, [fetchUsers, fetchPlans]);
+  const refreshAll = useCallback(() => { fetchUsers(true); fetchPlans(true); fetchModels(true); }, [fetchUsers, fetchPlans, fetchModels]);
 
   const visible = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -230,7 +281,7 @@ export default function AdminPage() {
 
         {/* Tabs */}
         <div className="flex items-center gap-2 border-b border-white/[0.06] -mb-2">
-          {([['users', 'Usuários', <Users className="w-4 h-4" />], ['plans', 'Planos', <Layers className="w-4 h-4" />]] as const).map(([key, label, icon]) => (
+          {([['users', 'Usuários', <Users className="w-4 h-4" />], ['plans', 'Planos', <Layers className="w-4 h-4" />], ['models', 'Modelos', <Cpu className="w-4 h-4" />]] as const).map(([key, label, icon]) => (
             <button
               key={key}
               onClick={() => setTab(key)}
@@ -429,6 +480,46 @@ export default function AdminPage() {
             )}
           </div>
         )}
+
+        {tab === 'models' && (
+          <div className="flex flex-col gap-7">
+            {/* Status dos provedores */}
+            <div>
+              <h2 className="text-lg font-semibold text-white">Provedores</h2>
+              <p className="text-xs text-slate-500 mt-0.5">Cada provedor tem sua própria chave no <code className="text-slate-400">.env</code>. Um modelo só funciona se o provedor estiver OK.</p>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+                {providers.map((p) => <ProviderStatusCard key={p.provider} p={p} />)}
+              </div>
+            </div>
+
+            {/* Modelos */}
+            <div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Modelos disponíveis</h2>
+                  <p className="text-xs text-slate-500 mt-0.5">Você define quais modelos os usuários podem escolher e o preço de cobrança.</p>
+                </div>
+                <button onClick={() => setModal({ type: 'modelEditor', model: null })} className="btn-primary flex items-center gap-2 px-4 py-2.5 text-sm rounded-xl">
+                  <Plus className="w-4 h-4" /> Novo modelo
+                </button>
+              </div>
+              {models.length === 0 ? (
+                <div className="card text-center py-16 text-slate-600 text-sm mt-4">Nenhum modelo cadastrado.</div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
+                  {models.map((m) => (
+                    <ModelCard
+                      key={m._id}
+                      model={m}
+                      onEdit={() => setModal({ type: 'modelEditor', model: m })}
+                      onDelete={() => setModal({ type: 'modelDelete', model: m })}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </main>
 
       {/* Modals */}
@@ -440,6 +531,8 @@ export default function AdminPage() {
           {modal.type === 'assign' && <AssignPlanModal user={modal.user} plans={plans} token={token()} onClose={() => setModal(null)} onDone={(msg) => { showNotice(msg); fetchUsers(true); }} />}
           {modal.type === 'planEditor' && <PlanEditorModal plan={modal.plan} token={token()} onClose={() => setModal(null)} onDone={(msg) => { showNotice(msg); fetchPlans(true); fetchUsers(true); }} />}
           {modal.type === 'planDelete' && <PlanDeleteModal plan={modal.plan} token={token()} onClose={() => setModal(null)} onDone={(msg) => { showNotice(msg); fetchPlans(true); fetchUsers(true); }} />}
+          {modal.type === 'modelEditor' && <ModelEditorModal model={modal.model} token={token()} onClose={() => setModal(null)} onDone={(msg) => { showNotice(msg); fetchModels(true); }} />}
+          {modal.type === 'modelDelete' && <ModelDeleteModal model={modal.model} token={token()} onClose={() => setModal(null)} onDone={(msg) => { showNotice(msg); fetchModels(true); }} />}
         </ModalOverlay>
       )}
     </div>
@@ -1041,6 +1134,199 @@ function PlanDeleteModal({ plan, token, onClose, onDone }: { plan: AdminPlan; to
       <ModalHeader title="Remover Plano" subtitle={plan.key} onClose={onClose} />
       <p className="text-sm text-slate-300">
         Remover o plano <strong className="text-white">{plan.name}</strong>? Usuários neste plano serão movidos automaticamente para o plano padrão.
+      </p>
+      {err && <div className="text-xs text-red-400 mt-3">{err}</div>}
+      <div className="flex gap-3 pt-5">
+        <button type="button" onClick={onClose} className="btn-secondary flex-1 py-2.5 text-sm rounded-xl justify-center">Cancelar</button>
+        <button onClick={submit} disabled={loading} className="flex-1 py-2.5 text-sm rounded-xl justify-center font-semibold transition-colors disabled:opacity-50" style={{ background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.30)', color: '#f87171' }}>
+          {loading ? 'Removendo...' : 'Remover'}
+        </button>
+      </div>
+    </>
+  );
+}
+
+// ─── AI Models ────────────────────────────────────────────────────────────────
+
+function ProviderStatusCard({ p }: { p: AiProvider }) {
+  return (
+    <div className="card px-4 py-3.5" style={{ borderColor: p.configured ? 'rgba(16,185,129,0.25)' : 'rgba(239,68,68,0.20)' }}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-sm font-semibold text-white">{p.name}</div>
+        <span
+          className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold border"
+          style={p.configured
+            ? { background: 'rgba(16,185,129,0.12)', borderColor: 'rgba(16,185,129,0.25)', color: '#34d399' }
+            : { background: 'rgba(239,68,68,0.12)', borderColor: 'rgba(239,68,68,0.25)', color: '#f87171' }}
+        >
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: p.configured ? '#34d399' : '#f87171' }} />
+          {p.configured ? 'OK' : 'Sem chave'}
+        </span>
+      </div>
+      <code className="text-[11px] text-slate-500 mt-1.5 block">{p.envKey}</code>
+    </div>
+  );
+}
+
+function ModelCard({ model, onEdit, onDelete }: { model: AdminAiModel; onEdit: () => void; onDelete: () => void }) {
+  const sc = model.available
+    ? { bg: 'rgba(16,185,129,0.12)', border: 'rgba(16,185,129,0.25)', text: '#34d399', label: 'Disponível' }
+    : !model.enabled
+      ? { bg: 'rgba(148,163,184,0.12)', border: 'rgba(148,163,184,0.2)', text: '#94a3b8', label: 'Desabilitado' }
+      : { bg: 'rgba(239,68,68,0.12)', border: 'rgba(239,68,68,0.25)', text: '#f87171', label: 'Sem chave do provedor' };
+  return (
+    <div className="card p-5 flex flex-col gap-4">
+      <div>
+        <div className="flex items-center gap-2">
+          <span className="text-base font-semibold text-white">{model.label}</span>
+          {model.isDefault && <Star className="w-3.5 h-3.5 text-amber-400" fill="#fbbf24" />}
+        </div>
+        <div className="flex items-center gap-2 mt-1 flex-wrap">
+          <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded" style={{ background: 'rgba(71,133,255,0.15)', color: '#7eb3ff' }}>{PROVIDER_LABELS[model.provider]}</span>
+          <code className="text-[11px] text-slate-500">{model.apiModel}</code>
+        </div>
+        {model.description && <p className="text-xs text-slate-500 mt-2">{model.description}</p>}
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 text-sm">
+        <PlanStat label="Input /1M" value={`$${(model.inputPer1M || 0).toFixed(2)}`} />
+        <PlanStat label="Output /1M" value={`$${(model.outputPer1M || 0).toFixed(2)}`} />
+      </div>
+
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border self-start" style={{ background: sc.bg, borderColor: sc.border, color: sc.text }}>
+        <span className="w-1.5 h-1.5 rounded-full" style={{ background: sc.text }} />
+        {sc.label}
+      </span>
+
+      <div className="flex gap-2 pt-1 mt-auto">
+        <button onClick={onEdit} className="btn-secondary flex-1 py-2 text-xs rounded-lg justify-center flex items-center gap-1.5">
+          <Pencil className="w-3 h-3" /> Editar
+        </button>
+        <button onClick={onDelete} className="px-3 py-2 text-xs rounded-lg border flex items-center justify-center transition-colors" style={{ borderColor: 'rgba(239,68,68,0.25)', color: '#f87171', background: 'rgba(239,68,68,0.08)' }}>
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ModelEditorModal({ model, token, onClose, onDone }: { model: AdminAiModel | null; token: string; onClose: () => void; onDone: (msg: string) => void }) {
+  const isEdit = Boolean(model);
+  const [label, setLabel] = useState(model?.label ?? '');
+  const [provider, setProvider] = useState<AiProviderKey>(model?.provider ?? 'openai');
+  const [apiModel, setApiModel] = useState(model?.apiModel ?? '');
+  const [description, setDescription] = useState(model?.description ?? '');
+  const [inputPer1M, setInputPer1M] = useState(String(model?.inputPer1M ?? ''));
+  const [outputPer1M, setOutputPer1M] = useState(String(model?.outputPer1M ?? ''));
+  const [enabled, setEnabled] = useState(model?.enabled ?? true);
+  const [isDefault, setIsDefault] = useState(model?.isDefault ?? false);
+  const [order, setOrder] = useState(String(model?.order ?? 0));
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!label.trim()) { setErr('Nome é obrigatório.'); return; }
+    if (!apiModel.trim()) { setErr('apiModel (id real na API) é obrigatório.'); return; }
+    setLoading(true); setErr('');
+    const payload = {
+      label: label.trim(), provider, apiModel: apiModel.trim(), description: description.trim(),
+      inputPer1M: Number(inputPer1M) || 0, outputPer1M: Number(outputPer1M) || 0,
+      enabled, isDefault, order: Number(order) || 0,
+    };
+    try {
+      if (isEdit) {
+        await api.put(`/api/billing/admin/models/${model!._id}`, payload, { headers: { Authorization: `Bearer ${token}` } });
+        onDone(`✓ Modelo ${label} atualizado`);
+      } else {
+        await api.post('/api/billing/admin/models', payload, { headers: { Authorization: `Bearer ${token}` } });
+        onDone(`✓ Modelo ${label} criado`);
+      }
+      onClose();
+    } catch (e: any) {
+      setErr(e?.response?.data?.error ?? 'Falha ao salvar modelo.');
+    } finally { setLoading(false); }
+  };
+
+  return (
+    <div className="max-h-[80vh] overflow-y-auto pr-1 -mr-1">
+      <ModalHeader title={isEdit ? 'Editar Modelo' : 'Novo Modelo'} subtitle={isEdit ? model!.apiModel : 'Cadastre um modelo de IA'} onClose={onClose} />
+      <form onSubmit={submit} className="space-y-4">
+        <Field label="Nome de exibição (o que o usuário vê)">
+          <input value={label} onChange={(e) => setLabel(e.target.value)} className="input" placeholder="GPT-4o" autoFocus />
+        </Field>
+
+        <Field label="Provedor (arquitetura da API)">
+          <div className="grid grid-cols-3 gap-2">
+            {(['openai', 'anthropic', 'deepseek'] as const).map((pv) => (
+              <button key={pv} type="button" onClick={() => setProvider(pv)}
+                className="py-2 rounded-xl text-xs font-semibold border transition-all"
+                style={provider === pv ? { background: 'rgba(140,70,255,0.15)', borderColor: 'rgba(140,70,255,0.30)', color: '#c084fc' } : { borderColor: 'rgba(255,255,255,0.08)', color: '#64748b' }}>
+                {PROVIDER_LABELS[pv]}
+              </button>
+            ))}
+          </div>
+        </Field>
+
+        <Field label="apiModel — id real na API do provedor">
+          <input value={apiModel} onChange={(e) => setApiModel(e.target.value)} className="input"
+            placeholder={provider === 'openai' ? 'gpt-4o' : provider === 'anthropic' ? 'claude-3-5-sonnet-20240620' : 'deepseek-chat'} />
+        </Field>
+
+        <Field label="Descrição">
+          <input value={description} onChange={(e) => setDescription(e.target.value)} className="input" placeholder="Forte para código." />
+        </Field>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Preço input (USD/1M)">
+            <input type="number" min="0" step="0.01" value={inputPer1M} onChange={(e) => setInputPer1M(e.target.value)} className="input" placeholder="2.50" />
+          </Field>
+          <Field label="Preço output (USD/1M)">
+            <input type="number" min="0" step="0.01" value={outputPer1M} onChange={(e) => setOutputPer1M(e.target.value)} className="input" placeholder="10.00" />
+          </Field>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <ToggleChip label="Habilitado" active={enabled} onClick={() => setEnabled((v) => !v)} />
+          <ToggleChip label="Padrão" active={isDefault} onClick={() => setIsDefault((v) => !v)} />
+        </div>
+
+        <Field label="Ordem de exibição">
+          <input type="number" value={order} onChange={(e) => setOrder(e.target.value)} className="input" placeholder="0" />
+        </Field>
+
+        {err && <div className="text-xs text-red-400">{err}</div>}
+        <div className="flex gap-3 pt-1">
+          <button type="button" onClick={onClose} className="btn-secondary flex-1 py-2.5 text-sm rounded-xl justify-center">Cancelar</button>
+          <button type="submit" disabled={loading} className="btn-primary flex-1 py-2.5 text-sm rounded-xl justify-center disabled:opacity-50">
+            {loading ? 'Salvando...' : isEdit ? 'Salvar' : 'Criar modelo'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ModelDeleteModal({ model, token, onClose, onDone }: { model: AdminAiModel; token: string; onClose: () => void; onDone: (msg: string) => void }) {
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+
+  const submit = async () => {
+    setLoading(true); setErr('');
+    try {
+      await api.delete(`/api/billing/admin/models/${model._id}`, { headers: { Authorization: `Bearer ${token}` } });
+      onDone(`✓ Modelo ${model.label} removido`);
+      onClose();
+    } catch (e: any) {
+      setErr(e?.response?.data?.error ?? 'Falha ao remover modelo.');
+    } finally { setLoading(false); }
+  };
+
+  return (
+    <>
+      <ModalHeader title="Remover Modelo" subtitle={model.label} onClose={onClose} />
+      <p className="text-sm text-slate-300">
+        Remover o modelo <strong className="text-white">{model.label}</strong>? Os usuários não poderão mais selecioná-lo.
       </p>
       {err && <div className="text-xs text-red-400 mt-3">{err}</div>}
       <div className="flex gap-3 pt-5">

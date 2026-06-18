@@ -368,10 +368,14 @@ async function runAgentStep({ req, project, command, parentCommand, requestId, s
     resultSummary: summarizeResult(item.result),
   }));
 
-  const currentPlan = Array.isArray(payload.agentPlan) ? payload.agentPlan : null;
   const TASK_MAX_ATTEMPTS = 3;
   // Conta falhas seguidas na MESMA tarefa para corrigir (até o limite) sem loop infinito.
   const consecutiveFailures = normalizedSuccess ? 0 : Number(payload.agentConsecutiveFailures || 0) + 1;
+
+  // O MODELO é dono do plano: a cada passo ele vê o resultado real, atualiza o status de
+  // cada tarefa e pode adicionar novas. O backend só garante que "done" é MONOTÔNICO —
+  // uma tarefa concluída nunca volta a pendente (impede refazer a mesma coisa).
+  const prevPlan = Array.isArray(payload.agentPlan) ? payload.agentPlan : null;
 
   if (!normalizedSuccess && consecutiveFailures > TASK_MAX_ATTEMPTS) {
     parentCommand.status = 'FAILED';
@@ -379,6 +383,7 @@ async function runAgentStep({ req, project, command, parentCommand, requestId, s
       ...payload,
       agentStatus: 'aborted',
       agentConsecutiveFailures: consecutiveFailures,
+      agentPlan: prevPlan,
       aiReply: `Não consegui concluir esta etapa após ${TASK_MAX_ATTEMPTS} correções seguidas (último erro: ${summarizedError || 'desconhecido'}). Parei para evitar loop.`,
     };
     return { siblings, agentContinued: false, agentResolved: true };
@@ -392,7 +397,7 @@ async function runAgentStep({ req, project, command, parentCommand, requestId, s
         goal: String(payload.agentGoal || payload.message || ''),
         project: { name: project?.name, placeId: project?.placeId, workspaceNodes },
         history,
-        currentPlan,
+        currentPlan: prevPlan,
         attemptsOnCurrent: consecutiveFailures,
         lastStepFailed: !normalizedSuccess,
         lastError: summarizedError,
@@ -433,23 +438,43 @@ async function runAgentStep({ req, project, command, parentCommand, requestId, s
   }
   const accCost = Number(payload.agentCostUsd || 0) + stepChargedUsd;
 
+  // Plano atualizado pelo modelo, com "done" carregado do plano anterior (monotônico).
+  const mergedPlan = mergeAgentPlan(prevPlan, decision.plan);
+
+  // Rede de segurança contra "ficar travado na 1ª tarefa": se o passo anterior teve
+  // SUCESSO mas o modelo não avançou nenhuma tarefa, marcamos a 1ª pendente como done.
+  if (normalizedSuccess && Array.isArray(mergedPlan) && mergedPlan.length > 0) {
+    const prevDone = (Array.isArray(prevPlan) ? prevPlan : []).filter((t) => t.status === 'done').length;
+    const newDone = mergedPlan.filter((t) => t.status === 'done').length;
+    if (newDone <= prevDone) {
+      const firstPending = mergedPlan.find((t) => t.status !== 'done');
+      if (firstPending) firstPending.status = 'done';
+    }
+  }
+
   // Objetivo concluído (ou sem passo seguro) → finaliza.
   if (decision.done || !decision.execution) {
+    const finalPlan = (mergedPlan || []).map((t) => ({
+      ...t,
+      status: decision.done ? 'done' : t.status,
+    }));
     parentCommand.status = decision.done ? 'DONE' : normalizedSuccess ? 'DONE' : 'FAILED';
     parentCommand.payload = {
       ...payload,
       agentStatus: decision.done ? 'done' : 'stopped',
       aiReply: decision.message || payload.aiReply,
-      agentPlan: decision.plan || payload.agentPlan,
+      agentPlan: finalPlan,
       agentConsecutiveFailures: consecutiveFailures,
       agentCostUsd: accCost,
     };
     return { siblings, agentContinued: false, agentResolved: true };
   }
 
-  // Valida/repara o passo e enfileira como PENDING (sem reaprovação).
-  let stepCommands = [];
-  try { stepCommands = AgentOrchestrator.compileExecutionsToCommands([decision.execution]) || []; } catch { stepCommands = []; }
+  // RunLuau: não precisa "parsear" o código — só pegar o source e mandar. Monta direto.
+  let stepCommands =
+    decision.execution && typeof decision.execution.source === 'string' && decision.execution.source.trim()
+      ? [{ action: 'RunLuau', payload: { language: 'luau', source: decision.execution.source } }]
+      : [];
   try {
     const validation = await AgentOrchestrator.validateAndRepairExecutions(stepCommands, {
       reviewModel: payload.selectedModel || payload.model,
@@ -461,7 +486,7 @@ async function runAgentStep({ req, project, command, parentCommand, requestId, s
 
   if (stepCommands.length === 0) {
     parentCommand.status = normalizedSuccess ? 'DONE' : 'FAILED';
-    parentCommand.payload = { ...payload, agentStatus: 'aborted', aiReply: 'O agente gerou um passo com código inválido que não pôde ser corrigido. Loop encerrado.', agentPlan: decision.plan || payload.agentPlan, agentConsecutiveFailures: consecutiveFailures, agentCostUsd: accCost };
+    parentCommand.payload = { ...payload, agentStatus: 'aborted', aiReply: 'O agente gerou um passo com código inválido que não pôde ser corrigido. Loop encerrado.', agentPlan: mergedPlan || prevPlan, agentConsecutiveFailures: consecutiveFailures, agentCostUsd: accCost };
     return { siblings, agentContinued: false, agentResolved: true };
   }
 
@@ -493,7 +518,7 @@ async function runAgentStep({ req, project, command, parentCommand, requestId, s
     agentStep: nextStepIndex,
     agentStatus: 'running',
     aiReply: decision.message || payload.aiReply,
-    agentPlan: decision.plan || payload.agentPlan,
+    agentPlan: mergedPlan || prevPlan,
     agentConsecutiveFailures: consecutiveFailures,
     agentCostUsd: accCost,
     executionSteps: refreshed.map((item, index) => ({
@@ -618,6 +643,27 @@ export const updateProjectCommandApproval = async (req, res) => {
 
 function countNodes(nodes = []) {
   return nodes.reduce((acc, node) => acc + 1 + countNodes(Array.isArray(node?.filhos) ? node.filhos : []), 0);
+}
+
+// Mescla o plano: adota o plano novo do modelo (títulos/status; pode ter tarefas a mais),
+// mas mantém como "done" tudo que já estava "done" antes — "done" é monotônico, então o
+// agente nunca refaz uma tarefa já concluída.
+function mergeAgentPlan(prevPlan, newPlan) {
+  const base = Array.isArray(newPlan) && newPlan.length > 0
+    ? newPlan.map((t) => ({ title: String(t.title || ''), status: t.status || 'pending' }))
+    : Array.isArray(prevPlan)
+      ? prevPlan.map((t) => ({ ...t }))
+      : null;
+  if (!base) return null;
+  const doneTitles = new Set(
+    (Array.isArray(prevPlan) ? prevPlan : [])
+      .filter((t) => t.status === 'done')
+      .map((t) => String(t.title).toLowerCase())
+  );
+  for (const t of base) {
+    if (doneTitles.has(String(t.title).toLowerCase())) t.status = 'done';
+  }
+  return base;
 }
 
 function stringifyResult(value) {

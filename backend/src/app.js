@@ -13,12 +13,16 @@ import { jobQueue } from './services/JobQueue.js';
 import { processAiThinkJob } from './services/AiThinkWorker.js';
 import { startEmailQueueWorker } from './services/EmailService.js';
 import { PlanService } from './services/PlanService.js';
+import { ModelRegistry } from './services/ModelRegistry.js';
 import { stripeWebhook } from './controllers/subscriptionController.js';
 
-// Conectar ao Banco de Dados e semear planos padrão
+// Conectar ao Banco de Dados e semear planos + registro de modelos de IA
 connectDB().then(() => {
   PlanService.seedDefaults().catch((err) =>
     console.error('[PlanService] Falha ao semear planos:', err.message)
+  );
+  ModelRegistry.seedDefaults().catch((err) =>
+    console.error('[ModelRegistry] Falha ao semear modelos:', err.message)
   );
 });
 

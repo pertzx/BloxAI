@@ -2947,77 +2947,87 @@ function RequestExecutionPanel({
   request: NonNullable<DisplayChatMessage['request']>;
   onDecision: (parentCommandId: string, decision: 'approve' | 'cancel') => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const hasScriptStep = request.steps.some((step) => step.action === 'CreateScript');
 
+  const counts = request.steps.reduce(
+    (acc, step) => {
+      if (step.status === 'DONE') acc.done += 1;
+      else if (step.status === 'FAILED' || step.status === 'FAILED_FINAL') acc.failed += 1;
+      else acc.running += 1;
+      return acc;
+    },
+    { done: 0, failed: 0, running: 0 }
+  );
+
   return (
-    <div className="mt-3 w-full rounded-2xl border border-slate-700 bg-slate-950/85">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-3 py-2">
-        <div>
-          <div className="text-[10px] uppercase tracking-wide text-slate-500">Execucao da resposta</div>
-          <div className="mt-1 text-xs text-slate-300">
-            {request.steps.length > 0
-              ? `${request.steps.length} comando(s) vinculados a esta requisicao`
-              : 'Nenhum comando gerado para esta requisicao'}
-          </div>
-          {hasScriptStep && (
-            <div className="mt-1 text-[11px] text-blue-200">
-              Esta resposta cria/edita script e o conteudo aparece logo abaixo no preview.
-            </div>
-          )}
-          {request.isRetryCorrection && (
-            <div className={`mt-2 rounded-xl border px-2.5 py-2 text-[11px] ${
-              request.retryMode === 'think'
-                ? 'border-violet-500/25 bg-violet-500/10 text-violet-100'
-                : 'border-amber-500/25 bg-amber-500/10 text-amber-100'
-            }`}>
-              {request.retryMode === 'think'
-                ? `Correcao gerada pelo modo Think apos revisar a falha anterior${request.retryCount ? ` (${request.retryCount} tentativa(s) de correcao)` : ''}.`
-                : `Correcao rapida gerada apos falha anterior${request.retryCount ? ` (${request.retryCount} tentativa(s) de correcao)` : ''}.`}
-            </div>
-          )}
-          {request.lastRetryGeneratedFrom && (
-            <div className="mt-2 rounded-xl border border-rose-500/20 bg-rose-500/10 px-2.5 py-2 text-[11px] text-rose-100">
-              {`Etapa que falhou antes: #${request.lastRetryGeneratedFrom.failedStepIndex || '?'} ${request.lastRetryGeneratedFrom.failedAction || 'Comando'}`}
-              {request.lastRetryGeneratedFrom.failedError ? ` | ${request.lastRetryGeneratedFrom.failedError}` : ''}
-            </div>
-          )}
-          {request.lastRetryWasFullScriptRegeneration && (
-            <div className="mt-2 rounded-xl border border-blue-500/20 bg-blue-500/10 px-2.5 py-2 text-[11px] text-blue-100">
-              A correcao atual reenviou a implementacao completa, nao apenas um patch parcial.
-            </div>
-          )}
-        </div>
+    <div className="mt-3 w-full overflow-hidden rounded-2xl border brd bg-sunken">
+      {/* Barra compacta — recolhida por padrão; detalhes só ao expandir. */}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="flex min-w-0 items-center gap-2 text-left"
+        >
+          <ChevronDown className={`h-3.5 w-3.5 shrink-0 txt-muted transition ${expanded ? 'rotate-0' : '-rotate-90'}`} />
+          <span className="text-[10px] uppercase tracking-wide txt-muted">Execução</span>
+          <span className="text-xs txt-soft">{request.steps.length} comando(s)</span>
+          {counts.done > 0 && <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-200">{counts.done} ✓</span>}
+          {counts.running > 0 && <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-200">{counts.running} ⏳</span>}
+          {counts.failed > 0 && <span className="rounded-full border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[10px] text-rose-200">{counts.failed} ✕</span>}
+        </button>
         <div className="flex items-center gap-2">
           {request.canApprove && (
             <button
               type="button"
               onClick={() => onDecision(request.parentCommandId, 'approve')}
-              className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-200 transition hover:bg-emerald-500/20"
+              className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-200 transition hover:bg-emerald-500/20"
             >
-              Autorizar execucao
+              Autorizar
             </button>
           )}
           {request.canCancel && (
             <button
               type="button"
               onClick={() => onDecision(request.parentCommandId, 'cancel')}
-              className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-200 transition hover:bg-rose-500/20"
+              className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs font-medium text-rose-200 transition hover:bg-rose-500/20"
             >
               Cancelar
             </button>
           )}
         </div>
       </div>
-      {request.latestError && (
-        <div className="border-b border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
-          Erro especifico: {request.latestError}
+
+      {expanded && (
+        <div className="border-t brd">
+          {hasScriptStep && (
+            <div className="px-3 py-2 text-[11px] text-blue-200">
+              Esta resposta cria/edita script — o conteúdo aparece nos cartões abaixo.
+            </div>
+          )}
+          {request.isRetryCorrection && (
+            <div className={`mx-3 mt-2 rounded-xl border px-2.5 py-2 text-[11px] ${
+              request.retryMode === 'think'
+                ? 'border-violet-500/25 bg-violet-500/10 text-violet-100'
+                : 'border-amber-500/25 bg-amber-500/10 text-amber-100'
+            }`}>
+              {request.retryMode === 'think'
+                ? `Correção gerada pelo modo Think após revisar a falha anterior${request.retryCount ? ` (${request.retryCount} tentativa(s))` : ''}.`
+                : `Correção rápida gerada após falha anterior${request.retryCount ? ` (${request.retryCount} tentativa(s))` : ''}.`}
+            </div>
+          )}
+          {request.latestError && (
+            <div className="mx-3 mt-2 rounded-xl border border-rose-500/20 bg-rose-500/10 px-2.5 py-2 text-[11px] text-rose-100">
+              Erro: {request.latestError}
+            </div>
+          )}
+          <div className="space-y-2 p-3">
+            {request.steps.map((step, index) => (
+              <ExecutionStepCard key={step.commandId} step={step} index={index} />
+            ))}
+          </div>
         </div>
       )}
-      <div className="space-y-2 p-3">
-        {request.steps.map((step, index) => (
-          <ExecutionStepCard key={step.commandId} step={step} index={index} />
-        ))}
-      </div>
     </div>
   );
 }

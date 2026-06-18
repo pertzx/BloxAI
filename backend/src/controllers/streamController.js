@@ -105,10 +105,12 @@ export const handleChatStream = async (req, res) => {
 
     // Conversa pura não precisa do seletor de explorer (LLM) — evita gasto de tokens
     // avulso em saudações. Para os demais tipos, o custo é faturado via thinkTelemetry.
+    // Single-pass (Think) e conversa NÃO usam o seletor de explorer por LLM — o Think
+    // já recebe o workspace inteiro no prompt da solução, e conversa não precisa.
     const thinkTelemetry = [];
     const thinkSelection =
-      intentProfile.responseType === 'conversation'
-        ? AgentOrchestrator.buildSkippedExplorerSelection('Conversa: explorer dispensado.')
+      intentProfile.responseType === 'conversation' || mode === 'think'
+        ? AgentOrchestrator.buildSkippedExplorerSelection('Single-pass/conversa: workspace enviado direto, sem seletor LLM.')
         : await AgentOrchestrator.runThinkSelection(intent, context, intentProfile, selectedModels.think, thinkTelemetry);
     const thinkCostUsd = thinkTelemetry.reduce((acc, item) => acc + Number(item.estimatedCostUsd || 0), 0);
     const compactContext = AgentOrchestrator.buildCompactContext(
@@ -118,24 +120,25 @@ export const handleChatStream = async (req, res) => {
       thinkSelection
     );
 
-    // ── 3.5 Fase de raciocínio (modo Think) — transparente e em streaming ──────
+    // ── 3.5 Fase de raciocínio (Think) — streamada ao vivo no painel "Raciocínio". ──
     let reasoningText = '';
     let reasoningCostUsd = 0;
     if (mode === 'think') {
       sendEvent({ type: 'think_start' });
-      const reasoningPrompt = [
-        `Tarefa do usuário: ${intent}`,
-        compactContext.summary,
-        'Pense em voz alta, passo a passo, sobre COMO resolver isto da melhor forma. Liste suas considerações, decisões e o plano de ação. Seja claro e conciso. NÃO escreva o código final aqui — apenas o raciocínio.',
-      ].join('\n\n');
       try {
+        const wsSummary = AgentOrchestrator.summarizeWorkspaceForAgent(workspaceNodes, 120);
         const reasoningResult = await ModelRouter.generateResponseStream(
-          reasoningPrompt,
+          [
+            `Objetivo do usuário: ${intent}`,
+            wsSummary ? `Estado atual do jogo (não recrie o que já existe):\n${wsSummary}` : 'Jogo praticamente vazio.',
+            compactContext.summary,
+            'Pense em voz alta, em português: o que JÁ existe, a lista de tarefas (to-do) para concluir o objetivo, e a ordem. NÃO escreva o código final aqui — só o raciocínio e o plano.',
+          ].filter(Boolean).join('\n\n'),
           {
-            model: selectedModels.think || selectedModels.generate,
-            systemPrompt: 'Você é um engenheiro Roblox sênior raciocinando sobre um problema antes de implementar. Escreva o raciocínio de forma clara, em português, em primeira pessoa.',
-            maxTokens: 2000,
-            temperature: 0.5,
+            model: selectedModels.generate,
+            systemPrompt: 'Você é um engenheiro Roblox sênior raciocinando sobre o problema antes de construir. Escreva o raciocínio e o plano de tarefas de forma clara e concisa, em primeira pessoa.',
+            maxTokens: 1200,
+            temperature: 0.4,
           },
           (token) => sendEvent({ type: 'think_token', token })
         );
@@ -147,22 +150,30 @@ export const handleChatStream = async (req, res) => {
       sendEvent({ type: 'think_done' });
     }
 
-    // ── 4. Gerar resposta ─────────────────────────────────────────────────────
+    // ── 4. Gerar resposta ──────────────────────────────────────────────────────
     const isConversation = intentProfile.responseType === 'conversation';
+    const treatAsAnalysis =
+      mode !== 'think' &&
+      (intentProfile.responseType === 'analysis' ||
+        intentProfile.taskType === 'analysis' ||
+        intentProfile.taskType === 'generic');
+    // Think = solução completa lendo o workspace; Instant não-conversa/não-análise também executa.
+    const wantsExecution = !isConversation && !treatAsAnalysis;
+    if (wantsExecution) intentProfile.responseType = 'proposal';
 
     let reply = '';
     let structuredResponse = { message: '', executions: [] };
     let rawExecutions = [];
     let executableCommands = [];
     let repairCostUsd = 0;
-    let agentPlan = null;
-    // Uso/custo da geração principal — compartilhado entre Think (planner) e Instant (stream).
     let genUsage = { estimatedCostUsd: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    let agentPlan = null;
 
     sendEvent({ type: 'start', responseType: intentProfile.responseType });
 
     if (mode === 'think') {
-      // === AGENTE: cria a to-do list e gera o PRIMEIRO passo dela ===
+      // === MODO AGENTE: planeja a to-do e gera o PRIMEIRO passo. Os próximos
+      // saem um a um (loop em reportCommandResult) até concluir, com sugestões no fim. ===
       intentProfile.responseType = 'proposal';
       const plannerTelemetry = [];
       const decision = await AgentOrchestrator.planNextAgentStep(
@@ -180,30 +191,23 @@ export const handleChatStream = async (req, res) => {
         plannerTelemetry
       );
       genUsage = {
-        estimatedCostUsd: plannerTelemetry.reduce((acc, item) => acc + Number(item.estimatedCostUsd || 0), 0),
-        inputTokens: plannerTelemetry.reduce((acc, item) => acc + Number(item.inputTokens || 0), 0),
-        outputTokens: plannerTelemetry.reduce((acc, item) => acc + Number(item.outputTokens || 0), 0),
-        totalTokens: plannerTelemetry.reduce((acc, item) => acc + Number(item.totalTokens || 0), 0),
+        estimatedCostUsd: plannerTelemetry.reduce((a, i) => a + Number(i.estimatedCostUsd || 0), 0),
+        inputTokens: plannerTelemetry.reduce((a, i) => a + Number(i.inputTokens || 0), 0),
+        outputTokens: plannerTelemetry.reduce((a, i) => a + Number(i.outputTokens || 0), 0),
+        totalTokens: plannerTelemetry.reduce((a, i) => a + Number(i.totalTokens || 0), 0),
       };
-
-      agentPlan = Array.isArray(decision.plan) ? decision.plan : null;
+      agentPlan = Array.isArray(decision.plan)
+        ? decision.plan.map((t, i) => ({ title: t.title, status: i === 0 ? 'doing' : 'pending' }))
+        : null;
       reply = decision.message || 'Plano criado.';
-      if (decision.execution) {
+      if (decision.execution && typeof decision.execution.source === 'string' && decision.execution.source.trim()) {
         rawExecutions = [decision.execution];
-        try { executableCommands = AgentOrchestrator.compileExecutionsToCommands([decision.execution]) || []; }
-        catch { executableCommands = []; }
+        executableCommands = [{ action: 'RunLuau', payload: { language: 'luau', source: decision.execution.source } }];
       }
       structuredResponse = { message: reply, executions: rawExecutions };
       sendEvent({ type: 'token', token: reply });
     } else {
-      // === Instant: conversa / análise / proposta em streaming ===
-      const treatAsAnalysis =
-        intentProfile.responseType === 'analysis' ||
-        intentProfile.taskType === 'analysis' ||
-        intentProfile.taskType === 'generic';
-      const wantsExecution = !isConversation && !treatAsAnalysis;
-      if (wantsExecution) intentProfile.responseType = 'proposal';
-
+      // === INSTANT: conversa / análise / proposta — single-pass em streaming. ===
       let prompt, systemPrompt, maxTokens;
       if (isConversation) {
         prompt = [
@@ -227,7 +231,7 @@ export const handleChatStream = async (req, res) => {
       } else {
         prompt = AgentOrchestrator.buildGeneratorPrompt(intent, compactContext, intentProfile, thinkSelection);
         systemPrompt =
-          'Você é o agente executor mestre do Blox AI. Responda APENAS com o JSON do envelope — sem "THINK:", sem "Resposta:", sem nenhum texto antes ou depois. Formato: {"message":"texto curto","executions":[{"executionId":1,"source": <CODIGO_LUAU>}]}. O `source` pode ser um bloco Lua long bracket [=[ ... ]=] (PREFERIDO, evita erros de escape) ou string JSON escapada; nunca string multiline comum entre aspas. O código deve ser Luau auto-contido, completo e de alta qualidade — nunca truncado ou simplificado demais. Implemente tudo que o pedido exige. Antes de finalizar, confira aspas, parênteses e blocos function/end.';
+          'Você é um DESENVOLVEDOR Roblox sênior dentro de um plugin: o Luau que você retorna É EXECUTADO no Studio e cria o jogo de verdade. Para UI, PREFIRA um LocalScript que monta a interface. NUNCA deixe nada pela metade (sem TODO/placeholder/comentário "fazer depois") — termine TUDO agora. Responda APENAS com o JSON do envelope — sem "THINK:", sem "Resposta:", sem nenhum texto antes ou depois. Formato: {"message":"texto curto","executions":[{"executionId":1,"source": <CODIGO_LUAU>}]}. O `source` pode ser um bloco Lua long bracket [=[ ... ]=] (PREFERIDO) ou string JSON escapada; nunca string multiline comum entre aspas. Código auto-contido, completo e de alta qualidade, nunca truncado ou simplificado demais. Antes de finalizar, confira aspas, parênteses e blocos function/end.';
         maxTokens = 8000;
       }
 
@@ -263,7 +267,7 @@ export const handleChatStream = async (req, res) => {
       }
       if (streamResult.truncated && wantsExecution) {
         executableCommands = [];
-        reply = 'A resposta foi cortada pelo limite de tokens antes de gerar uma execução completa e segura. Para evitar enfileirar código incompleto, nada foi executado — refaça o pedido com um escopo menor ou tente novamente.';
+        reply = 'A resposta foi cortada pelo limite de tokens. Para evitar código incompleto, nada foi enfileirado — divida o pedido em partes menores e tente de novo.';
         structuredResponse = { message: reply, executions: [] };
       }
     }
@@ -283,10 +287,8 @@ export const handleChatStream = async (req, res) => {
       }
     }
 
-    // Modo Think = agente: enfileira só o PRIMEIRO passo. Os próximos são decididos
-    // um a um com o resultado real de cada execução (loop em reportCommandResult).
-    const isAgentLoop = mode === 'think';
-    if (isAgentLoop && executableCommands.length > 1) {
+    // Modo agente (Think): enfileira só o PRIMEIRO passo; os próximos saem um a um.
+    if (mode === 'think' && executableCommands.length > 1) {
       executableCommands = [executableCommands[0]];
     }
 
@@ -350,8 +352,8 @@ export const handleChatStream = async (req, res) => {
           aiExecutions: rawExecutions,
           aiContextSummary: compactContext.summary,
           aiReasoning: reasoningText,
-          aiMode2: isAgentLoop ? 'think' : 'instant',
-          ...(isAgentLoop && shouldAwaitApproval
+          aiMode2: mode === 'think' ? 'think' : 'instant',
+          ...(mode === 'think' && shouldAwaitApproval
             ? {
                 agentLoop: true,
                 agentGoal: intent,
@@ -359,6 +361,7 @@ export const handleChatStream = async (req, res) => {
                 agentStep: 1,
                 agentStatus: 'running',
                 agentPlan: agentPlan || null,
+                agentTaskCursor: 0,
               }
             : {}),
           aiResponseType: intentProfile.responseType,
@@ -391,7 +394,7 @@ export const handleChatStream = async (req, res) => {
       commandDoc.requestId = String(commandDoc._id);
       commandId = String(commandDoc._id);
 
-      const realCostUsd = Number(genUsage?.estimatedCostUsd || 0) + reasoningCostUsd + thinkCostUsd + repairCostUsd;
+      const realCostUsd = Number(genUsage?.estimatedCostUsd || 0) + thinkCostUsd + repairCostUsd + reasoningCostUsd;
       if (realCostUsd > 0) {
         try {
           billing = await CreditService.chargeForUsage({
